@@ -1,10 +1,10 @@
 """
-data_manager.py — P2-ETF-REGIME-PREDICTOR
+data_manager.py — P3-ETF-REGIME-PREDICTOR
 ==========================================
 Handles all data fetching, feature engineering, and GitLab storage.
 
 Data sources:
-  - FRED API: macro signals (DGS10, T10YT2Y, T10Y3M, DTB3, MORTGAGE30US,
+  - FRED API: macro signals (DGS10, T10Y2Y, T10Y3M, DTB3, MORTGAGE30US,
                VIXCLS, DTWEXBGS, DCOILWTICO, BAMLC0A0CM, BAMLH0A0HYM2,
                UMCSENT, T10YIE)
   - yfinance (fallback: Stooq): ETF OHLCV for TLT, TBT, VNQ, SLV, GLD,
@@ -54,7 +54,7 @@ ALL_TICKERS      = TARGET_ETFS + BENCHMARK_ETFS
 
 FRED_SERIES = {
     "DGS10":        "10Y Treasury Yield",
-    "T10YT2Y":      "10Y-2Y Yield Spread",
+    "T10Y2Y":      "10Y-2Y Yield Spread",
     "T10Y3M":       "10Y-3M Yield Spread",
     "DTB3":         "3M T-Bill Rate",
     "MORTGAGE30US": "30Y Mortgage Rate",
@@ -316,7 +316,7 @@ def compute_macro_features(df: pd.DataFrame) -> pd.DataFrame:
         new_cols["Real_Yield_10Y"] = df["DGS10"] - df["T10YIE"]
 
     # Rate momentum + rising/falling flags
-    for series in ["DGS10", "T10YT2Y", "T10Y3M", "T10YIE"]:
+    for series in ["DGS10", "T10Y2Y", "T10Y3M", "T10YIE"]:
         if series in df.columns:
             mom20 = df[series].diff(20)
             mom60 = df[series].diff(60)
@@ -330,11 +330,11 @@ def compute_macro_features(df: pd.DataFrame) -> pd.DataFrame:
         new_cols["DGS10_Accel"] = df["DGS10"].diff(20).diff(20)
 
     # Yield curve shape
-    if "T10YT2Y" in df.columns:
-        new_cols["YC_Inverted"] = (df["T10YT2Y"] < 0).astype(int)
-        new_cols["YC_Flat"]     = ((df["T10YT2Y"] >= 0) &
-                                   (df["T10YT2Y"] < 0.5)).astype(int)
-        new_cols["YC_Steep"]    = (df["T10YT2Y"] >= 0.5).astype(int)
+    if "T10Y2Y" in df.columns:
+        new_cols["YC_Inverted"] = (df["T10Y2Y"] < 0).astype(int)
+        new_cols["YC_Flat"]     = ((df["T10Y2Y"] >= 0) &
+                                   (df["T10Y2Y"] < 0.5)).astype(int)
+        new_cols["YC_Steep"]    = (df["T10Y2Y"] >= 0.5).astype(int)
 
     # Inflation regime
     if "T10YIE" in df.columns:
