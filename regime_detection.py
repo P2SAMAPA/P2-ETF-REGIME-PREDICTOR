@@ -379,7 +379,7 @@ def characterise_regimes(df: pd.DataFrame,
                 row[f"Avg_{col}"] = round(sub[col].mean() * 252, 4)
 
         # Macro context
-        for macro in ["VIXCLS", "DGS10", "T10YT2Y", "T10YIE",
+        for macro in ["VIXCLS", "DGS10", "T10Y2Y", "T10YIE",
                       "BAMLH0A0HYM2"]:
             if macro in sub.columns:
                 row[f"Avg_{macro}"] = round(sub[macro].mean(), 3)
@@ -407,7 +407,7 @@ def label_regimes(characteristics: pd.DataFrame) -> dict:
 
     vix_col = "Avg_VIXCLS" if "Avg_VIXCLS" in characteristics.columns else None
     hy_col  = "Avg_BAMLH0A0HYM2" if "Avg_BAMLH0A0HYM2" in characteristics.columns else None
-    yc_col  = "Avg_T10YT2Y" if "Avg_T10YT2Y" in characteristics.columns else None
+    yc_col  = "Avg_T10Y2Y" if "Avg_T10Y2Y" in characteristics.columns else None
     inf_col = "Avg_T10YIE" if "Avg_T10YIE" in characteristics.columns else None
 
     regimes = list(characteristics.index)
