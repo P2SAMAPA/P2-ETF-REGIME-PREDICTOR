@@ -113,6 +113,10 @@ def run_pipeline(force_refresh: bool = False,
         df["Regime_Name"] = "Global"
         results["optimal_k"] = 1
 
+    # Fill any NaN regime values (first ~20 rows before first window)
+    df["Regime"]      = df["Regime"].fillna(0).astype(int)
+    df["Regime_Name"] = df["Regime_Name"].fillna("Global")
+
     # ── Step 3: Build forward targets ─────────────────────────────────────────
     log.info("Step 3: Building forward return targets...")
 
@@ -138,6 +142,12 @@ def run_pipeline(force_refresh: bool = False,
     feature_cols = get_feature_columns(df_train)
     log.info(f"Features: {len(feature_cols)}")
 
+    # Clean NaNs from feature matrix — fill with column median
+    df_train[feature_cols] = df_train[feature_cols].fillna(
+        df_train[feature_cols].median()
+    ).fillna(0.0)
+    log.info("NaN cleaning applied to feature matrix")
+
     bank = RegimeModelBank()
     try:
         bank.fit(df_train, fwd_train,
@@ -153,6 +163,12 @@ def run_pipeline(force_refresh: bool = False,
 
     # ── Step 5: Generate prediction history (for backtest) ────────────────────
     log.info("Step 5: Generating prediction history...")
+
+    # Ensure Regime column is clean integer before prediction
+    df["Regime"] = df["Regime"].fillna(0).astype(int)
+    df[feature_cols] = df[feature_cols].fillna(
+        df[feature_cols].median()
+    ).fillna(0.0)
 
     try:
         pred_history = bank.predict_all_history(df)
