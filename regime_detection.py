@@ -36,9 +36,10 @@ log = logging.getLogger(__name__)
 
 WINDOW_SIZE   = 20        # Rolling window (trading days) per distribution
 K_MIN         = 3         # Minimum number of regimes to test
-K_MAX         = 6         # Maximum number of regimes to test
-N_INIT        = 10        # WK-means restarts (take best)
-MAX_ITER      = 100       # Max iterations per WK-means run
+K_MAX         = 5         # Maximum number of regimes to test
+N_INIT        = 3         # WK-means restarts (take best)
+MAX_ITER      = 30        # Max iterations per WK-means run
+MAX_WINDOWS   = 400       # Subsample windows — Wasserstein is O(n²)
 RANDOM_SEED   = 42
 
 # Human-readable regime names assigned post-clustering based on characteristics
@@ -229,8 +230,20 @@ class WassersteinKMeans:
         Fit WK-means to windows array of shape (N, window_size, n_assets).
         Runs n_init times and keeps the best (lowest inertia) result.
         """
+        # Subsample for tractability — Wasserstein distance is O(n²)
+        rng_sub = np.random.RandomState(self.random_state)
+        N_orig  = len(windows)
+        if N_orig > MAX_WINDOWS:
+            sub_idx = rng_sub.choice(N_orig, size=MAX_WINDOWS, replace=False)
+            sub_idx = np.sort(sub_idx)   # preserve time order
+            fit_windows = windows[sub_idx]
+            log.info(f"Subsampled {N_orig} → {MAX_WINDOWS} windows for fitting")
+        else:
+            fit_windows = windows
+            sub_idx     = np.arange(N_orig)
+
         log.info(f"WK-means fitting k={self.k}, "
-                 f"{self.n_init} inits, {len(windows)} windows...")
+                 f"{self.n_init} inits, {len(fit_windows)} windows...")
 
         best_labels    = None
         best_centroids = None
@@ -239,7 +252,7 @@ class WassersteinKMeans:
         for run in range(self.n_init):
             seed = self.random_state + run
             try:
-                labels, centroids, inertia = self._single_run(windows, seed)
+                labels, centroids, inertia = self._single_run(fit_windows, seed)
                 log.info(f"  Run {run+1}/{self.n_init}: "
                          f"inertia={inertia:.4f}, iters={self.n_iter_}")
                 if inertia < best_inertia:
@@ -249,9 +262,16 @@ class WassersteinKMeans:
             except Exception as e:
                 log.warning(f"  Run {run+1} failed: {e}")
 
-        self.labels_    = best_labels
         self.centroids_ = best_centroids
         self.inertia_   = best_inertia
+
+        # Predict labels for ALL original windows using fitted centroids
+        if N_orig > MAX_WINDOWS:
+            log.info(f"Predicting labels for all {N_orig} windows...")
+            self.labels_ = self.predict(windows)
+        else:
+            self.labels_ = best_labels
+
         log.info(f"WK-means fitted: best inertia={best_inertia:.4f}")
         return self
 
@@ -336,11 +356,21 @@ def select_optimal_k(windows: np.ndarray,
     scores = {}
     log.info(f"Selecting optimal k from {k_min} to {k_max}...")
 
+    # Subsample for k selection — use smaller set for speed
+    rng = np.random.RandomState(RANDOM_SEED)
+    k_max_windows = min(200, len(windows))
+    if len(windows) > k_max_windows:
+        kidx    = np.sort(rng.choice(len(windows), k_max_windows, replace=False))
+        k_windows = windows[kidx]
+        log.info(f"k-selection subsampled to {k_max_windows} windows")
+    else:
+        k_windows = windows
+
     for k in range(k_min, k_max + 1):
         try:
-            model  = WassersteinKMeans(k=k, n_init=3, max_iter=50)
-            labels = model.fit_predict(windows)
-            score  = mmd_score(windows, labels)
+            model  = WassersteinKMeans(k=k, n_init=2, max_iter=20)
+            labels = model.fit_predict(k_windows)
+            score  = mmd_score(k_windows, labels)
             scores[k] = round(score, 4)
             log.info(f"  k={k}: MMD score={score:.4f}")
         except Exception as e:
