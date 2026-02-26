@@ -1,0 +1,63 @@
+# daily_pipeline.yml
+# Runs every weekday at 6:30am EST (11:30 UTC)
+# Fetches new data, retrains models, pushes signal to GitLab
+
+name: Daily Training Pipeline
+
+on:
+  schedule:
+    - cron: "30 11 * * 1-5"   # 11:30 UTC = 6:30am EST (UTC-5)
+  workflow_dispatch:            # Allow manual trigger from GitHub Actions UI
+    inputs:
+      force_refresh:
+        description: "Force full dataset rebuild"
+        required: false
+        default: "false"
+        type: boolean
+      run_wfcv:
+        description: "Run walk-forward cross-validation"
+        required: false
+        default: "false"
+        type: boolean
+
+jobs:
+  train:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    env:
+      GITLAB_API_TOKEN: ${{ secrets.GITLAB_API_TOKEN }}
+      GITLAB_REPO_URL:  ${{ secrets.GITLAB_REPO_URL }}
+      FRED_API_KEY:     ${{ secrets.FRED_API_KEY }}
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run training pipeline
+        run: |
+          ARGS=""
+          if [ "${{ github.event.inputs.force_refresh }}" = "true" ]; then
+            ARGS="$ARGS --force-refresh"
+          fi
+          if [ "${{ github.event.inputs.run_wfcv }}" = "true" ]; then
+            ARGS="$ARGS --wfcv"
+          fi
+          python train.py $ARGS
+
+      - name: Upload pipeline logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pipeline-logs-${{ github.run_id }}
+          path: "*.log"
+          retention-days: 7
