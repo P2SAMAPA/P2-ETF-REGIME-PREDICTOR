@@ -325,7 +325,8 @@ class RegimeModelBank:
             df[self.feature_cols_].values, nan=0.0)
 
         for i, (idx, row) in enumerate(df.iterrows()):
-            regime = int(row.get("Regime", 0))
+            regime_val = row.get("Regime", 0)
+            regime = int(regime_val) if pd.notna(regime_val) else 0
             X      = feat_matrix[i:i+1]
             preds  = self.predict(X, regime)
             entry  = {"Date": idx, "Regime": regime}
