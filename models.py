@@ -210,6 +210,18 @@ class RegimeModelBank:
             feature_cols = get_feature_columns(df)
         self.feature_cols_ = feature_cols
 
+        # Compute base rates (historical P(beat cash)) per ETF
+        # Prevents high-base-rate ETFs (e.g. VNQ in bull markets) from
+        # always winning purely due to unconditional frequency
+        self.base_rates_: Dict[str, float] = {}
+        for etf in TARGET_ETFS:
+            col = f"{etf}_BeatCash"
+            if col in fwd_df.columns:
+                self.base_rates_[etf] = float(fwd_df[col].dropna().mean())
+            else:
+                self.base_rates_[etf] = 0.5
+        log.info(f"ETF base rates: { {k: round(v,3) for k,v in self.base_rates_.items()} }")
+
         common_idx  = df.index.intersection(fwd_df.index)
         df_a        = df.loc[common_idx]
         fwd_a       = fwd_df.loc[common_idx]
@@ -314,7 +326,15 @@ class RegimeModelBank:
                               "LGBM_Prob": 0.5, "LogReg_Prob": 0.5,
                               "Disagree": False, "Source": "error"})
 
-        return pd.DataFrame(rows).set_index("ETF")
+        result = pd.DataFrame(rows).set_index("ETF")
+
+        # P_Adjusted = P(beat cash) minus ETF's own historical base rate
+        # Rankings based on P_Adjusted prevent regime-lock from base-rate bias
+        for etf in result.index:
+            base = self.base_rates_.get(etf, 0.5) if hasattr(self, "base_rates_") else 0.5
+            result.loc[etf, "P_Adjusted"] = float(result.loc[etf, "P_BeatCash"]) - base
+
+        return result
 
     def predict_all_history(self, df: pd.DataFrame) -> pd.DataFrame:
         """Run predictions for every row — used for backtesting."""
@@ -333,6 +353,7 @@ class RegimeModelBank:
             for etf in TARGET_ETFS:
                 if etf in preds.index:
                     entry[f"{etf}_P"]        = preds.loc[etf, "P_BeatCash"]
+                    entry[f"{etf}_PA"]       = preds.loc[etf, "P_Adjusted"] if "P_Adjusted" in preds.columns else preds.loc[etf, "P_BeatCash"] - 0.5
                     entry[f"{etf}_Disagree"] = preds.loc[etf, "Disagree"]
             rows.append(entry)
 
