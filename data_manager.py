@@ -526,6 +526,27 @@ def load_model_from_gitlab(filename: str) -> Optional[bytes]:
     return gitlab_read_binary(f"models/{filename}")
 
 
+def save_predictions_to_gitlab(pred_df: pd.DataFrame) -> bool:
+    return gitlab_write_file(
+        "data/pred_history.csv", pred_df.to_csv(),
+        f"Update predictions {pred_df.index[-1].date()} ({len(pred_df)} rows)"
+    )
+
+
+def load_predictions_from_gitlab() -> Optional[pd.DataFrame]:
+    content = gitlab_read_file("data/pred_history.csv")
+    if content is None:
+        return None
+    try:
+        df = pd.read_csv(io.StringIO(content), index_col=0, parse_dates=True)
+        df.index = pd.to_datetime(df.index)
+        log.info(f"Loaded predictions from GitLab: {len(df)} rows")
+        return df
+    except Exception as e:
+        log.error(f"Predictions parse error: {e}")
+        return None
+
+
 def save_feature_list_to_gitlab(feature_names: list) -> bool:
     content = json.dumps({"features":  feature_names,
                           "updated":   datetime.utcnow().isoformat()})
