@@ -37,9 +37,9 @@ log = logging.getLogger(__name__)
 WINDOW_SIZE   = 20        # Rolling window (trading days) per distribution
 K_MIN         = 3         # Minimum number of regimes to test
 K_MAX         = 5         # Maximum number of regimes to test
-N_INIT        = 3         # WK-means restarts (take best)
-MAX_ITER      = 30        # Max iterations per WK-means run
-MAX_WINDOWS   = 400       # Subsample windows — Wasserstein is O(n²)
+N_INIT        = 5         # WK-means restarts (take best)
+MAX_ITER      = 50        # Max iterations per WK-means run
+MAX_WINDOWS   = 1500      # Subsample windows — Wasserstein is O(n²)
 RANDOM_SEED   = 42
 
 # Human-readable regime names assigned post-clustering based on characteristics
@@ -358,7 +358,7 @@ def select_optimal_k(windows: np.ndarray,
 
     # Subsample for k selection — use smaller set for speed
     rng = np.random.RandomState(RANDOM_SEED)
-    k_max_windows = min(200, len(windows))
+    k_max_windows = min(600, len(windows))
     if len(windows) > k_max_windows:
         kidx    = np.sort(rng.choice(len(windows), k_max_windows, replace=False))
         k_windows = windows[kidx]
@@ -368,7 +368,7 @@ def select_optimal_k(windows: np.ndarray,
 
     for k in range(k_min, k_max + 1):
         try:
-            model  = WassersteinKMeans(k=k, n_init=2, max_iter=20)
+            model  = WassersteinKMeans(k=k, n_init=3, max_iter=30)
             labels = model.fit_predict(k_windows)
             score  = mmd_score(k_windows, labels)
             scores[k] = round(score, 4)
