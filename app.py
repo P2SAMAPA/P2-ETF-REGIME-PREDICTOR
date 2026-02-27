@@ -598,32 +598,62 @@ else:
     st.info("No audit trail available yet.")
 
 # ═════════════════════════════════════════════════════════════════════════════
-# FEATURE IMPORTANCE
+# FEATURE IMPORTANCE / MOMENTUM WEIGHTS
 # ═════════════════════════════════════════════════════════════════════════════
 st.divider()
-st.subheader("🔍 Top 20 Features by LightGBM Gain")
 
-try:
-    from models import aggregate_feature_importance
-    imp_df = aggregate_feature_importance(bank).head(20)
-    if not imp_df.empty:
-        fig_i = go.Figure(go.Bar(
-            x=imp_df["Mean_Gain"],
-            y=imp_df["Feature"],
-            orientation="h",
-            marker_color="#00d1b2",
-            hovertemplate="%{y}<br>Mean Gain: %{x:.1f}<extra></extra>",
-        ))
-        fig_i.update_layout(
-            template="plotly_white",
-            height=500,
-            margin=dict(l=0, r=0, t=10, b=0),
-            xaxis=dict(title="Mean Gain", showgrid=True, gridcolor="#eeeeee"),
-            yaxis=dict(autorange="reversed", showgrid=False),
-        )
-        st.plotly_chart(fig_i, use_container_width=True)
-except Exception as e:
-    st.info(f"Feature importance not available: {e}")
+if use_momentum:
+    st.subheader("⚖️ Option B — Momentum Score Weights")
+    weights_data = {
+        "Component": [
+            "RoC 5d (×0.40)", "RoC 10d (×0.30)",
+            "RoC 21d (×0.20)", "RoC 63d (×0.10)",
+            "OBV Accumulation 21d (×0.15)",
+            "Breakout vs 20d Range (×0.15)",
+        ],
+        "Weight": [0.40, 0.30, 0.20, 0.10, 0.15, 0.15],
+        "Category": ["Momentum","Momentum","Momentum","Momentum","Volume","Breakout"],
+    }
+    wdf = pd.DataFrame(weights_data)
+    fig_i = go.Figure(go.Bar(
+        x=wdf["Weight"],
+        y=wdf["Component"],
+        orientation="h",
+        marker_color=["#00d1b2"]*4 + ["#ffa500"] + ["#ff6b6b"],
+        hovertemplate="%{y}<br>Weight: %{x:.2f}<extra></extra>",
+    ))
+    fig_i.update_layout(
+        template="plotly_white",
+        height=300,
+        margin=dict(l=0, r=0, t=10, b=0),
+        xaxis=dict(title="Weight", showgrid=True, gridcolor="#eeeeee"),
+        yaxis=dict(autorange="reversed", showgrid=False),
+    )
+    st.plotly_chart(fig_i, use_container_width=True)
+else:
+    st.subheader("🔍 Option A — Top 20 Features by Ensemble Gain")
+    try:
+        from models import aggregate_feature_importance
+        imp_df = aggregate_feature_importance(bank).head(20)
+        if not imp_df.empty:
+            fig_i = go.Figure(go.Bar(
+                x=imp_df["Mean_Gain"],
+                y=imp_df["Feature"],
+                orientation="h",
+                marker_color="#00d1b2",
+                hovertemplate="%{y}<br>Mean Gain: %{x:.1f}<extra></extra>",
+            ))
+            fig_i.update_layout(
+                template="plotly_white",
+                height=500,
+                margin=dict(l=0, r=0, t=10, b=0),
+                xaxis=dict(title="Mean Gain (LambdaRank + XGBoost)",
+                           showgrid=True, gridcolor="#eeeeee"),
+                yaxis=dict(autorange="reversed", showgrid=False),
+            )
+            st.plotly_chart(fig_i, use_container_width=True)
+    except Exception as e:
+        st.info(f"Feature importance not available: {e}")
 
 # ═════════════════════════════════════════════════════════════════════════════
 # SIGNALS HISTORY
