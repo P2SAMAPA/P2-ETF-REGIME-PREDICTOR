@@ -265,6 +265,20 @@ def run_pipeline(force_refresh: bool = False,
         ok = save_model_to_gitlab(bank.to_bytes(), "model_bank.pkl")
         log.info(f"  Model bank saved: {ok}")
 
+        # ── Layer 2B: Momentum ranker ────────────────────────────────────
+        log.info("Step 5b: Training Layer 2B momentum ranker...")
+        try:
+            momentum_ranker = MomentumRanker()
+            momentum_ranker.fit(df)
+            ok = save_model_to_gitlab(momentum_ranker.to_bytes(), "momentum_ranker.pkl")
+            log.info(f"  Momentum ranker saved: {ok}")
+            mom_pred = momentum_ranker.predict_all_history(df)
+            ok = save_predictions_to_gitlab(mom_pred, "data/mom_pred_history.csv")
+            log.info(f"  Momentum predictions saved: {ok}")
+        except Exception as e:
+            log.error(f"  Momentum ranker failed: {e}")
+
+
         # Signals
         ok = save_signals_to_gitlab(signal_row)
         log.info(f"  Signal saved: {ok}")
