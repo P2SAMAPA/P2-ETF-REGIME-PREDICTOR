@@ -432,29 +432,28 @@ def build_full_dataset(start_year: int = 2008) -> pd.DataFrame:
 def build_forward_targets(df: pd.DataFrame,
                            forward_days: int = 5,
                            rf_rate_col: str = "DTB3") -> pd.DataFrame:
-    """
-    Binary forward return targets per ETF.
-    1 = ETF 5-day forward return > risk-free rate × 5/252, else 0.
-    Also stores raw forward returns for P&L calculations.
-    """
+    # Build forward return targets at multiple horizons (5, 10, 15, 20 days).
+    # Stores raw forward returns at each horizon per ETF.
+    # The ranking model selects optimal horizon per (ETF, regime).
     fwd = pd.DataFrame(index=df.index)
-
-    daily_rf  = (df[rf_rate_col] / 100 / 252
-                 if rf_rate_col in df.columns
-                 else pd.Series(0.045 / 252, index=df.index))
-    threshold = daily_rf * forward_days
+    daily_rf = (df[rf_rate_col] / 100 / 252
+                if rf_rate_col in df.columns
+                else pd.Series(0.045 / 252, index=df.index))
 
     for ticker in TARGET_ETFS:
         ret_col = f"{ticker}_Ret"
         if ret_col not in df.columns:
             continue
-        fwd_ret = df[ret_col].rolling(forward_days).sum().shift(-forward_days)
-        fwd[f"{ticker}_FwdRet"]   = fwd_ret
-        fwd[f"{ticker}_BeatCash"] = (fwd_ret > threshold).astype(int)
+        for h in [5, 10, 15, 20]:
+            fwd_ret = df[ret_col].rolling(h).sum().shift(-h)
+            rf_thr  = daily_rf * h
+            fwd[f"{ticker}_FwdRet{h}d"]   = fwd_ret
+            fwd[f"{ticker}_BeatCash{h}d"] = (fwd_ret > rf_thr).astype(int)
+        # Default 5d for backward compatibility
+        fwd[f"{ticker}_FwdRet"]   = fwd[f"{ticker}_FwdRet5d"]
+        fwd[f"{ticker}_BeatCash"] = fwd[f"{ticker}_BeatCash5d"]
 
     return fwd
-
-
 # ── Incremental update ───────────────────────────────────────────────────────
 
 def incremental_update(existing_df: pd.DataFrame) -> pd.DataFrame:
