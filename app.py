@@ -39,10 +39,11 @@ try:
         get_data, build_forward_targets,
         load_signals_from_gitlab, load_model_from_gitlab,
         load_feature_list_from_gitlab, load_predictions_from_gitlab,
+        load_momentum_ranker_from_gitlab, load_momentum_predictions_from_gitlab,
         TARGET_ETFS,
     )
     from regime_detection import RegimeDetector
-    from models import RegimeModelBank
+    from models import RegimeModelBank, MomentumRanker
     from strategy import (
         execute_strategy, calculate_metrics,
         calculate_benchmark_metrics, TARGET_ETFS as STRAT_ETFS,
@@ -127,6 +128,22 @@ with st.sidebar:
     st.subheader("📊 Display")
     benchmark = st.selectbox("Benchmark", ["SPY", "AGG", "None"])
     show_wfcv = st.checkbox("Show Walk-Forward CV", value=False)
+    st.divider()
+    st.subheader("🧠 Layer 2 Mode")
+    layer2_mode = st.radio(
+        "ETF Ranking Method",
+        options=["Option A — ML Ensemble", "Option B — Momentum"],
+        index=0,
+        help=(
+            "**Option A — ML Ensemble**: XGBoost + Ridge + LambdaRank trained "
+            "per market regime. Enters only when ≥2/3 models agree. "
+            "Best when macro patterns are regime-consistent.\n\n"
+            "**Option B — Momentum**: Pure Rate-of-Change ranking — 5d/10d/21d/63d "
+            "RoC + volume accumulation + 20d breakout score. No ML, fully "
+            "transparent. Best when trends are strong and persistent."
+        )
+    )
+    use_momentum = "Option B" in layer2_mode
 
     st.divider()
     run_btn = st.button("🚀 Run Model", type="primary", use_container_width=True)
@@ -134,9 +151,12 @@ with st.sidebar:
 
 # ── Main panel ────────────────────────────────────────────────────────────────
 st.title("📈 P2-ETF Regime-Aware Rotation Model")
+mode_label = ("Option B — Momentum (RoC + Volume + Breakout)"
+               if use_momentum else
+               "Option A — ML Ensemble (XGBoost + Ridge + LambdaRank voting)")
 st.caption(
-    "Wasserstein k-means regime detection • LightGBM + Logistic Regression ensemble • "
-    "5 binary classifiers (TLT · TBT · VNQ · SLV · GLD)"
+    f"Wasserstein k-means regime detection • {mode_label} • "
+    "ETFs: TLT · TBT · VNQ · SLV · GLD"
 )
 
 if "refresh_status" not in st.session_state:
@@ -208,21 +228,35 @@ with st.spinner("📥 Loading dataset from GitLab..."):
 # ── Load models from GitLab ───────────────────────────────────────────────────
 with st.spinner("🧠 Loading models from GitLab..."):
     detector = cached_load_detector()
-    bank     = cached_load_bank()
 
     if detector:
         st.success(f"✅ Regime detector loaded (k={detector.optimal_k_})")
     else:
         st.warning("⚠️ Regime detector not found — run pipeline first")
 
-    if bank:
-        n_regime = len(getattr(bank, "models_", {}))
-        st.success(f"✅ Model bank loaded "
-                   f"({n_regime} regime ranking models + 1 global fallback)")
+    if use_momentum:
+        # Layer 2B — Momentum
+        mom_bytes = load_momentum_ranker_from_gitlab()
+        if mom_bytes:
+            momentum_ranker = MomentumRanker.from_bytes(mom_bytes)
+            bank = None
+            st.success("✅ Momentum ranker loaded (Option B — RoC + Volume + Breakout)")
+        else:
+            st.error("⚠️ Momentum ranker not found — run Manual Retrain first")
+            momentum_ranker = None
+            bank = None
     else:
-        st.warning("⚠️ Model bank not found — run pipeline first")
+        # Layer 2A — ML Ensemble
+        bank = cached_load_bank()
+        momentum_ranker = None
+        if bank:
+            n_regime = len(getattr(bank, "models_", {}))
+            st.success(f"✅ ML Ensemble loaded — Option A "
+                       f"({n_regime} regime models, XGBoost+Ridge+LambdaRank voting)")
+        else:
+            st.warning("⚠️ ML model bank not found — run pipeline first")
 
-if detector is None or bank is None:
+if detector is None or (bank is None and momentum_ranker is None):
     st.error("Models not available. Trigger Manual Retrain in GitHub Actions first.")
     st.stop()
 
@@ -266,20 +300,25 @@ with st.spinner("📡 Loading predictions from GitLab..."):
             from models import get_feature_columns
             feature_cols = get_feature_columns(df)
 
-        pred_history = cached_load_predictions()
-
-        if pred_history is None:
-            # Fallback: generate in app (slow — only if GitLab file missing)
-            st.warning("⚠️ Pre-computed predictions not found — generating now (slow)...")
-            feat_df = df.copy()
-            feat_df[feature_cols] = (feat_df[feature_cols]
-                                      .fillna(feat_df[feature_cols].median())
-                                      .fillna(0.0))
-            pred_history = bank.predict_all_history(feat_df)
-            st.info("💡 Tip: Trigger Manual Retrain in GitHub Actions to pre-compute predictions")
+        if use_momentum:
+            pred_history = load_momentum_predictions_from_gitlab()
+            if pred_history is None:
+                st.warning("⚠️ Momentum predictions not found — generating now...")
+                pred_history = momentum_ranker.predict_all_history(df)
+            else:
+                st.success(f"✅ Momentum predictions loaded: {len(pred_history):,} rows")
         else:
-            st.success(f"✅ Predictions loaded: {len(pred_history):,} rows "
-                       f"(current to {pred_history.index[-1].date()})")
+            pred_history = cached_load_predictions()
+            if pred_history is None:
+                st.warning("⚠️ ML predictions not found — generating now (slow)...")
+                feat_df = df.copy()
+                feat_df[feature_cols] = (feat_df[feature_cols]
+                                          .fillna(feat_df[feature_cols].median())
+                                          .fillna(0.0))
+                pred_history = bank.predict_all_history(feat_df)
+            else:
+                st.success(f"✅ ML predictions loaded: {len(pred_history):,} rows "
+                           f"(current to {pred_history.index[-1].date()})")
     except Exception as e:
         st.error(f"❌ Prediction load failed: {e}")
         st.stop()
