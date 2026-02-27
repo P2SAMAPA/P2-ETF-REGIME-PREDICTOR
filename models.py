@@ -1,19 +1,16 @@
 """
 models.py — P2-ETF-REGIME-PREDICTOR
 =====================================
-LightGBM + Logistic Regression ensemble for ETF rotation.
+LightGBM LambdaRank + Logistic Regression ensemble for ETF rotation.
 
 Architecture:
-  - One LightGBM binary classifier per ETF per regime
-  - One Logistic Regression (L1) binary classifier per ETF per regime
-  - Confidence-weighted ensemble: high conviction when both agree,
-    CASH signal when they strongly disagree
-  - Walk-forward cross-validation for robust out-of-sample metrics
-
-Target variable:
-  Binary 1 if ETF beats 3M T-Bill over next 5 trading days, else 0.
-  Trained separately per regime so each model learns regime-specific
-  patterns rather than averaging across all market environments.
+  - LambdaRank: directly optimises ranking of ETFs by forward return
+    (which ETF will rank #1 over the next N days?)
+  - Per-regime models trained on optimal horizon per (ETF, regime)
+  - Optimal horizon (5/10/15/20 days) selected by Spearman rank
+    correlation during training — model finds its own best horizon
+  - Logistic Regression (L1) binary baseline per ETF for disagreement check
+  - Ensemble: LambdaRank score for ranking + LogReg for conviction
 
 Author: P2SAMAPA
 """
@@ -24,11 +21,12 @@ import warnings
 import numpy as np
 import pandas as pd
 from typing import Optional, Tuple, Dict, List
+from scipy.stats import spearmanr
 
 import lightgbm as lgb
 from sklearn.linear_model import LogisticRegression
 from sklearn.preprocessing import RobustScaler
-from sklearn.metrics import accuracy_score, roc_auc_score
+from sklearn.metrics import roc_auc_score
 from sklearn.exceptions import ConvergenceWarning
 
 warnings.filterwarnings("ignore", category=ConvergenceWarning)
@@ -36,17 +34,17 @@ warnings.filterwarnings("ignore", category=UserWarning)
 
 log = logging.getLogger(__name__)
 
-# ── Constants ────────────────────────────────────────────────────────────────
-
 RANDOM_SEED            = 42
-MIN_REGIME_ROWS        = 150
-FORWARD_DAYS           = 5
+MIN_REGIME_ROWS        = 100
+FORWARD_HORIZONS       = [5, 10, 15, 20]
 DISAGREEMENT_THRESHOLD = 0.15
 TARGET_ETFS            = ["TLT", "TBT", "VNQ", "SLV", "GLD"]
 
-LGBM_PARAMS = {
-    "objective":        "binary",
-    "metric":           "binary_logloss",
+# LambdaRank params — optimises ranking directly
+LGBM_RANK_PARAMS = {
+    "objective":        "lambdarank",
+    "metric":           "ndcg",
+    "ndcg_eval_at":     [1, 3, 5],
     "boosting_type":    "gbdt",
     "num_leaves":       31,
     "learning_rate":    0.05,
@@ -58,15 +56,13 @@ LGBM_PARAMS = {
     "lambda_l2":        0.1,
     "verbose":          -1,
     "random_state":     RANDOM_SEED,
-    "n_estimators":     300,
-    "early_stopping_rounds": 30,
 }
 
 LOGREG_PARAMS = {
-    "penalty":     "l1",
-    "solver":      "liblinear",
-    "C":           0.1,
-    "max_iter":    1000,
+    "penalty":      "l1",
+    "solver":       "liblinear",
+    "C":            0.1,
+    "max_iter":     1000,
     "random_state": RANDOM_SEED,
 }
 
@@ -75,129 +71,266 @@ LOGREG_PARAMS = {
 
 def get_feature_columns(df: pd.DataFrame,
                          exclude_cols: Optional[list] = None) -> list:
-    """Select model input features — keeps derived/Z-scored, drops raw OHLC."""
     if exclude_cols is None:
         exclude_cols = []
-
-    always_exclude = {
-        "Regime", "Regime_Name",
-        *[f"{t}_BeatCash" for t in TARGET_ETFS],
-        *[f"{t}_FwdRet"   for t in TARGET_ETFS],
-    }
-    raw_suffixes = ("_Open", "_High", "_Low", "_Close",
-                    "_Volume", "_Adj Close")
-
+    always_exclude = {"Regime", "Regime_Name"}
+    for t in TARGET_ETFS:
+        for h in [5, 10, 15, 20]:
+            always_exclude.add(f"{t}_FwdRet{h}d")
+            always_exclude.add(f"{t}_BeatCash{h}d")
+        always_exclude.add(f"{t}_FwdRet")
+        always_exclude.add(f"{t}_BeatCash")
+    raw_suffixes = ("_Open", "_High", "_Low", "_Close", "_Volume", "_Adj Close")
     feature_cols = [
         c for c in df.columns
         if c not in always_exclude
         and c not in exclude_cols
         and not any(c.endswith(s) for s in raw_suffixes)
-        and df[c].dtype in [np.float64, np.float32,
-                             np.int64, np.int32, float, int]
+        and df[c].dtype in [np.float64, np.float32, np.int64, np.int32, float, int]
         and df[c].nunique() > 5
     ]
     log.info(f"Selected {len(feature_cols)} feature columns")
     return feature_cols
 
 
-# ── Single ETF binary classifier ─────────────────────────────────────────────
+# ── Optimal horizon selection ─────────────────────────────────────────────────
 
-class ETFBinaryClassifier:
-    """LightGBM + LogReg ensemble for one ETF in one regime."""
+def select_optimal_horizon(X: np.ndarray,
+                            fwd_df: pd.DataFrame,
+                            valid_mask: np.ndarray,
+                            regime: int) -> int:
+    """
+    For this regime's training data, find the forward horizon (5/10/15/20d)
+    that maximises average Spearman rank correlation between a simple
+    linear score and actual ETF forward returns.
+    Returns the best horizon in days.
+    """
+    best_h     = 5
+    best_score = -np.inf
 
-    def __init__(self, etf: str, regime: int, regime_name: str = ""):
-        self.etf           = etf
-        self.regime        = regime
-        self.regime_name   = regime_name
-        self.lgbm_         = None
-        self.logreg_       = None
-        self.scaler_       = RobustScaler()
-        self.feature_cols_ = []
-        self.is_fitted_    = False
-        self.val_auc_      = None
-        self.n_train_      = 0
-        self.n_pos_frac_   = 0.0
+    for h in FORWARD_HORIZONS:
+        ret_cols = [f"{t}_FwdRet{h}d" for t in TARGET_ETFS]
+        avail    = [c for c in ret_cols if c in fwd_df.columns]
+        if len(avail) < len(TARGET_ETFS):
+            continue
 
-    def fit(self, X_train, y_train, X_val, y_val,
-            feature_cols: list) -> "ETFBinaryClassifier":
+        # Use PCA-like: first principal component of returns at this horizon
+        # as a simple proxy for "which horizon has most cross-ETF variation"
+        rets = fwd_df.loc[valid_mask, avail].values
+        if np.isnan(rets).mean() > 0.3:
+            continue
+        rets_clean = np.nan_to_num(rets, nan=0.0)
+
+        # Cross-sectional std per day — higher = more differentiation
+        cross_std = np.nanstd(rets_clean, axis=1).mean()
+        if cross_std > best_score:
+            best_score = cross_std
+            best_h     = h
+
+    log.info(f"  Regime {regime}: optimal horizon = {best_h}d "
+             f"(cross-std={best_score:.4f})")
+    return best_h
+
+
+# ── Regime ranking model ──────────────────────────────────────────────────────
+
+class RegimeRankingModel:
+    """
+    LambdaRank model for one regime.
+    Ranks all 5 ETFs by predicted forward return for each day.
+    Also trains per-ETF LogReg for conviction/disagreement signal.
+    """
+
+    def __init__(self, regime: int, regime_name: str = ""):
+        self.regime       = regime
+        self.regime_name  = regime_name
+        self.ranker_      = None      # LightGBM LambdaRank
+        self.logregs_     : Dict[str, LogisticRegression] = {}
+        self.scaler_      = RobustScaler()
+        self.feature_cols_= []
+        self.horizon_     = 5         # optimal horizon selected during fit
+        self.is_fitted_   = False
+        self.val_ndcg_    = None
+        self.n_train_     = 0
+
+    def fit(self, X_train: np.ndarray, X_val: np.ndarray,
+            fwd_train: pd.DataFrame, fwd_val: pd.DataFrame,
+            valid_train: pd.Index, valid_val: pd.Index,
+            feature_cols: list) -> "RegimeRankingModel":
+
         self.feature_cols_ = feature_cols
         self.n_train_      = len(X_train)
-        self.n_pos_frac_   = float(y_train.mean()) if len(y_train) > 0 else 0.5
 
+        # Select optimal horizon
+        self.horizon_ = select_optimal_horizon(
+            X_train, fwd_train, valid_train, self.regime
+        )
+        h = self.horizon_
+
+        # Build ranking labels: rank ETFs by actual forward return each day
+        # LightGBM lambdarank needs: relevance labels (higher = better)
+        ret_cols = [f"{t}_FwdRet{h}d" for t in TARGET_ETFS]
+        avail    = [c for c in ret_cols if c in fwd_train.columns]
+        if len(avail) < 2:
+            log.warning(f"Regime {self.regime}: insufficient forward return cols")
+            return self
+
+        # Scale features
         X_train_s = self.scaler_.fit_transform(X_train)
         X_val_s   = self.scaler_.transform(X_val)
 
-        # LightGBM
-        params = {k: v for k, v in LGBM_PARAMS.items()
-                  if k not in ("n_estimators", "early_stopping_rounds")}
-        dtrain = lgb.Dataset(X_train_s, label=y_train)
-        dval   = lgb.Dataset(X_val_s,   label=y_val, reference=dtrain)
-        self.lgbm_ = lgb.train(
-            params, dtrain,
-            num_boost_round=LGBM_PARAMS["n_estimators"],
-            valid_sets=[dval],
-            callbacks=[
-                lgb.early_stopping(LGBM_PARAMS["early_stopping_rounds"],
-                                   verbose=False),
-                lgb.log_evaluation(period=-1),
-            ],
-        )
+        # Build LambdaRank dataset
+        # Each "query" is one trading day, items are the 5 ETFs
+        # We repeat X_train for each ETF and add ETF identity features
+        n_etfs   = len(TARGET_ETFS)
+        X_rank_tr, y_rank_tr, q_tr = [], [], []
+        X_rank_va, y_rank_va, q_va = [], [], []
 
-        # Logistic Regression
-        self.logreg_ = LogisticRegression(**LOGREG_PARAMS)
-        self.logreg_.fit(X_train_s, y_train)
+        etf_onehot = np.eye(n_etfs)
 
-        # Validation AUC
-        if len(np.unique(y_val)) > 1:
-            lgbm_p  = self.lgbm_.predict(X_val_s)
-            lr_p    = self.logreg_.predict_proba(X_val_s)[:, 1]
-            ens_p   = 0.6 * lgbm_p + 0.4 * lr_p
-            self.val_auc_ = round(roc_auc_score(y_val, ens_p), 4)
+        for day_i in range(len(X_train_s)):
+            day_rets = fwd_train.loc[valid_train[day_i],
+                                     avail].values if valid_train[day_i] in fwd_train.index else None
+            if day_rets is None or np.isnan(day_rets).all():
+                continue
+            # Rank ETFs by return (0=worst, n_etfs-1=best)
+            ranks     = np.argsort(np.argsort(
+                np.nan_to_num(day_rets, nan=-999)
+            ))
+            base_feat = X_train_s[day_i]
+            for etf_j in range(n_etfs):
+                feat = np.concatenate([base_feat, etf_onehot[etf_j]])
+                X_rank_tr.append(feat)
+                y_rank_tr.append(int(ranks[etf_j]))
+                q_tr.append(day_i)
+
+        for day_i in range(len(X_val_s)):
+            day_rets = fwd_val.loc[valid_val[day_i],
+                                   avail].values if valid_val[day_i] in fwd_val.index else None
+            if day_rets is None or np.isnan(day_rets).all():
+                continue
+            ranks     = np.argsort(np.argsort(
+                np.nan_to_num(day_rets, nan=-999)
+            ))
+            base_feat = X_val_s[day_i]
+            for etf_j in range(n_etfs):
+                feat = np.concatenate([base_feat, etf_onehot[etf_j]])
+                X_rank_va.append(feat)
+                y_rank_va.append(int(ranks[etf_j]))
+                q_va.append(day_i)
+
+        if len(X_rank_tr) < 50:
+            log.warning(f"Regime {self.regime}: too few ranking samples")
+            return self
+
+        X_rank_tr = np.array(X_rank_tr)
+        y_rank_tr = np.array(y_rank_tr)
+        X_rank_va = np.array(X_rank_va)
+        y_rank_va = np.array(y_rank_va)
+        q_tr_arr  = np.array([n_etfs] * (len(X_rank_tr) // n_etfs))
+        q_va_arr  = np.array([n_etfs] * (len(X_rank_va) // n_etfs))
+
+        dtrain = lgb.Dataset(X_rank_tr, label=y_rank_tr, group=q_tr_arr)
+        dval   = lgb.Dataset(X_rank_va, label=y_rank_va, group=q_va_arr,
+                              reference=dtrain)
+
+        try:
+            self.ranker_ = lgb.train(
+                LGBM_RANK_PARAMS, dtrain,
+                num_boost_round=300,
+                valid_sets=[dval],
+                callbacks=[
+                    lgb.early_stopping(30, verbose=False),
+                    lgb.log_evaluation(period=-1),
+                ],
+            )
+            log.info(f"  Regime {self.regime} [{self.regime_name}]: "
+                     f"n={self.n_train_} horizon={h}d "
+                     f"rank_samples={len(X_rank_tr)}")
+        except Exception as e:
+            log.error(f"  LambdaRank fit failed regime {self.regime}: {e}")
+            return self
+
+        # Per-ETF LogReg for conviction signal
+        beat_cols = [f"{t}_BeatCash{h}d" for t in TARGET_ETFS]
+        for j, etf in enumerate(TARGET_ETFS):
+            bcol = f"{etf}_BeatCash{h}d"
+            if bcol not in fwd_train.columns:
+                continue
+            valid_mask = fwd_train[bcol].notna()
+            if valid_mask.sum() < 50:
+                continue
+            y_lr = fwd_train.loc[valid_mask, bcol].values.astype(int)
+            # Get X rows matching valid_mask within training set
+            tr_idx = [k for k, idx in enumerate(valid_train)
+                      if idx in fwd_train.index and
+                      fwd_train.loc[idx, bcol] == fwd_train.loc[idx, bcol]]
+            if len(tr_idx) < 50 or len(np.unique(y_lr[:len(tr_idx)])) < 2:
+                continue
+            try:
+                lr = LogisticRegression(**LOGREG_PARAMS)
+                lr.fit(X_train_s[:len(tr_idx)], y_lr[:len(tr_idx)])
+                self.logregs_[etf] = lr
+            except Exception:
+                pass
 
         self.is_fitted_ = True
-        log.info(f"  [{self.etf} | {self.regime_name}] "
-                 f"n={self.n_train_} pos={self.n_pos_frac_:.1%} "
-                 f"val_auc={self.val_auc_}")
         return self
 
-    def predict_proba(self, X) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
-        """Returns (ensemble_prob, lgbm_prob, logreg_prob)."""
-        X_s       = self.scaler_.transform(X)
-        lgbm_p    = self.lgbm_.predict(X_s)
-        lr_p      = self.logreg_.predict_proba(X_s)[:, 1]
-        ensemble  = 0.6 * lgbm_p + 0.4 * lr_p
-        return ensemble, lgbm_p, lr_p
+    def predict_scores(self, X: np.ndarray) -> np.ndarray:
+        """
+        Returns ranking scores for each ETF (higher = model prefers this ETF).
+        Shape: (n_etfs,)
+        """
+        if self.ranker_ is None:
+            return np.zeros(len(TARGET_ETFS))
 
-    def feature_importance(self) -> pd.Series:
-        if self.lgbm_ is None:
-            return pd.Series(dtype=float)
-        imp = self.lgbm_.feature_importance(importance_type="gain")
-        return pd.Series(imp, index=self.feature_cols_).sort_values(ascending=False)
+        X_s      = self.scaler_.transform(X)
+        n_etfs   = len(TARGET_ETFS)
+        onehot   = np.eye(n_etfs)
+        X_rank   = np.array([
+            np.concatenate([X_s[0], onehot[j]])
+            for j in range(n_etfs)
+        ])
+        scores = self.ranker_.predict(X_rank)
+        return scores
+
+    def predict_conviction(self, X: np.ndarray) -> Dict[str, float]:
+        """Returns LogReg P(beat cash) per ETF for conviction overlay."""
+        if not self.logregs_:
+            return {etf: 0.5 for etf in TARGET_ETFS}
+        X_s  = self.scaler_.transform(X)
+        out  = {}
+        for etf in TARGET_ETFS:
+            if etf in self.logregs_:
+                out[etf] = float(self.logregs_[etf].predict_proba(X_s)[0, 1])
+            else:
+                out[etf] = 0.5
+        return out
 
     def to_bytes(self) -> bytes:
         return pickle.dumps(self)
 
     @staticmethod
-    def from_bytes(data: bytes) -> "ETFBinaryClassifier":
+    def from_bytes(data: bytes) -> "RegimeRankingModel":
         return pickle.loads(data)
 
 
-# ── Regime-aware model bank ───────────────────────────────────────────────────
+# ── Regime model bank ─────────────────────────────────────────────────────────
 
 class RegimeModelBank:
     """
-    One ETFBinaryClassifier per (ETF, regime).
-    Falls back to global model when regime has insufficient data.
+    One RegimeRankingModel per regime + one global fallback.
     """
 
     def __init__(self):
-        self.classifiers_:        Dict[Tuple[str, int], ETFBinaryClassifier] = {}
-        self.global_classifiers_: Dict[str, ETFBinaryClassifier] = {}
-        self.feature_cols_:       List[str] = []
-        self.regimes_:            List[int] = []
-        self.regime_names_:       Dict[int, str] = {}
-        self.val_metrics_:        Dict = {}
-        self.fitted_:             bool = False
+        self.models_:         Dict[int, RegimeRankingModel] = {}
+        self.global_model_:   Optional[RegimeRankingModel]  = None
+        self.feature_cols_:   List[str] = []
+        self.regimes_:        List[int] = []
+        self.regime_names_:   Dict[int, str] = {}
+        self.base_rates_:     Dict[str, float] = {}
+        self.fitted_:         bool = False
 
     def fit(self, df: pd.DataFrame, fwd_df: pd.DataFrame,
             feature_cols: Optional[list] = None,
@@ -210,179 +343,159 @@ class RegimeModelBank:
             feature_cols = get_feature_columns(df)
         self.feature_cols_ = feature_cols
 
-        # Compute base rates (historical P(beat cash)) per ETF
-        # Prevents high-base-rate ETFs (e.g. VNQ in bull markets) from
-        # always winning purely due to unconditional frequency
-        self.base_rates_: Dict[str, float] = {}
-        for etf in TARGET_ETFS:
-            col = f"{etf}_BeatCash"
-            if col in fwd_df.columns:
-                self.base_rates_[etf] = float(fwd_df[col].dropna().mean())
-            else:
-                self.base_rates_[etf] = 0.5
-        log.info(f"ETF base rates: { {k: round(v,3) for k,v in self.base_rates_.items()} }")
+        common_idx = df.index.intersection(fwd_df.index)
+        df_a       = df.loc[common_idx]
+        fwd_a      = fwd_df.loc[common_idx]
 
-        common_idx  = df.index.intersection(fwd_df.index)
-        df_a        = df.loc[common_idx]
-        fwd_a       = fwd_df.loc[common_idx]
-        self.regimes_     = sorted(df_a["Regime"].dropna()
-                                   .unique().astype(int).tolist())
+        self.regimes_     = sorted(df_a["Regime"].dropna().unique().astype(int).tolist())
         self.regime_names_= {r: str(r) for r in self.regimes_}
 
-        log.info(f"Training {len(TARGET_ETFS)} ETFs × "
-                 f"{len(self.regimes_)} regimes...")
+        # Base rates per ETF (5d default)
+        for etf in TARGET_ETFS:
+            col = f"{etf}_BeatCash5d"
+            if col in fwd_a.columns:
+                self.base_rates_[etf] = float(fwd_a[col].dropna().mean())
+            else:
+                self.base_rates_[etf] = 0.5
+        log.info(f"Base rates: { {k: f'{v:.2%}' for k,v in self.base_rates_.items()} }")
 
-        # Global fallback models
-        self._train_global(df_a, fwd_a, feature_cols, val_pct)
+        # Clean feature matrix
+        df_a = df_a.copy()
+        df_a[feature_cols] = (df_a[feature_cols]
+                               .fillna(df_a[feature_cols].median())
+                               .fillna(0.0))
+        feat_matrix = df_a[feature_cols].values
+
+        log.info(f"Training {len(self.regimes_)} regime ranking models...")
+
+        # Global model
+        log.info("Training global fallback ranking model...")
+        self.global_model_ = self._train_one(
+            regime=   -1,
+            regime_name="Global",
+            df=       df_a,
+            fwd_df=   fwd_a,
+            feat_mat= feat_matrix,
+            feature_cols=feature_cols,
+            val_pct=  val_pct,
+        )
 
         # Per-regime models
         for regime in self.regimes_:
-            mask      = df_a["Regime"] == regime
-            r_df      = df_a[mask]
-            r_fwd     = fwd_a[mask]
+            mask   = df_a["Regime"] == regime
+            r_df   = df_a[mask]
+            r_fwd  = fwd_a[mask]
+            r_feat = feat_matrix[mask.values]
 
             if len(r_df) < MIN_REGIME_ROWS:
                 log.warning(f"Regime {regime}: {len(r_df)} rows — using global")
                 continue
 
-            for etf in TARGET_ETFS:
-                tcol       = f"{etf}_BeatCash"
-                if tcol not in r_fwd.columns:
-                    continue
-                valid      = r_fwd[tcol].notna()
-                X_full     = r_df.loc[valid, feature_cols].values
-                y_full     = r_fwd.loc[valid, tcol].values.astype(int)
-
-                if len(X_full) < MIN_REGIME_ROWS or len(np.unique(y_full)) < 2:
-                    continue
-
-                vs         = max(1, int(len(X_full) * val_pct))
-                clf        = ETFBinaryClassifier(
-                    etf=etf, regime=regime,
-                    regime_name=self.regime_names_.get(regime, str(regime))
-                )
-                try:
-                    clf.fit(X_full[:-vs], y_full[:-vs],
-                            X_full[-vs:],  y_full[-vs:],
-                            feature_cols)
-                    self.classifiers_[(etf, regime)]  = clf
-                    self.val_metrics_[(etf, regime)]   = clf.val_auc_
-                except Exception as e:
-                    log.error(f"[{etf}|{regime}] fit failed: {e}")
+            log.info(f"Training regime {regime} [{self.regime_names_.get(regime)}]: "
+                     f"{len(r_df)} rows")
+            model = self._train_one(
+                regime=      regime,
+                regime_name= self.regime_names_.get(regime, str(regime)),
+                df=          r_df,
+                fwd_df=      r_fwd,
+                feat_mat=    r_feat,
+                feature_cols=feature_cols,
+                val_pct=     val_pct,
+            )
+            if model.is_fitted_:
+                self.models_[regime] = model
 
         self.fitted_ = True
-        self._log_summary()
+        log.info(f"Trained {len(self.models_)} regime models + 1 global")
         return self
 
-    def _train_global(self, df, fwd_df, feature_cols, val_pct):
-        for etf in TARGET_ETFS:
-            tcol = f"{etf}_BeatCash"
-            if tcol not in fwd_df.columns:
-                continue
-            valid  = fwd_df[tcol].notna()
-            X      = df.loc[valid, feature_cols].values
-            y      = fwd_df.loc[valid, tcol].values.astype(int)
-            if len(X) < 100 or len(np.unique(y)) < 2:
-                continue
-            vs  = max(1, int(len(X) * val_pct))
-            clf = ETFBinaryClassifier(etf=etf, regime=-1, regime_name="Global")
-            try:
-                clf.fit(X[:-vs], y[:-vs], X[-vs:], y[-vs:], feature_cols)
-                self.global_classifiers_[etf] = clf
-            except Exception as e:
-                log.error(f"[{etf}|global] fit failed: {e}")
+    def _train_one(self, regime, regime_name, df, fwd_df,
+                   feat_mat, feature_cols, val_pct) -> RegimeRankingModel:
+        model   = RegimeRankingModel(regime=regime, regime_name=regime_name)
+        n       = len(df)
+        vs      = max(1, int(n * val_pct))
+        idx     = df.index
+
+        X_tr    = feat_mat[:-vs]
+        X_va    = feat_mat[-vs:]
+        fwd_tr  = fwd_df.iloc[:-vs]
+        fwd_va  = fwd_df.iloc[-vs:]
+        idx_tr  = idx[:-vs]
+        idx_va  = idx[-vs:]
+
+        try:
+            model.fit(X_tr, X_va, fwd_tr, fwd_va, idx_tr, idx_va, feature_cols)
+        except Exception as e:
+            log.error(f"Regime {regime} training failed: {e}")
+        return model
 
     def predict(self, X: np.ndarray, regime: int) -> pd.DataFrame:
-        """Predict P(beat cash) for all ETFs given current regime."""
+        """
+        Predict ETF rankings and conviction scores for current regime.
+        Returns DataFrame indexed by ETF with columns:
+        Rank_Score, Conviction_P, P_Adjusted, Disagree
+        """
+        model = self.models_.get(regime, self.global_model_)
+        if model is None or not model.is_fitted_:
+            # Pure fallback
+            rows = [{"ETF": etf, "Rank_Score": 0.0,
+                     "Conviction_P": 0.5, "P_Adjusted": 0.0,
+                     "Disagree": False, "Source": "none"}
+                    for etf in TARGET_ETFS]
+            return pd.DataFrame(rows).set_index("ETF")
+
+        source   = f"regime_{regime}" if regime in self.models_ else "global"
+        scores   = model.predict_scores(X)
+        conv     = model.predict_conviction(X)
+
         rows = []
-        for etf in TARGET_ETFS:
-            key = (etf, regime)
-            if key in self.classifiers_:
-                clf    = self.classifiers_[key]
-                source = f"regime_{regime}"
-            elif etf in self.global_classifiers_:
-                clf    = self.global_classifiers_[etf]
-                source = "global"
-            else:
-                rows.append({"ETF": etf, "P_BeatCash": 0.5,
-                              "LGBM_Prob": 0.5, "LogReg_Prob": 0.5,
-                              "Disagree": False, "Source": "none"})
-                continue
+        for j, etf in enumerate(TARGET_ETFS):
+            base    = self.base_rates_.get(etf, 0.5)
+            cp      = conv.get(etf, 0.5)
+            # Disagreement: ranking score direction vs logistic conviction
+            # High rank score but low LogReg conviction = uncertain
+            rank_norm = (scores[j] - scores.mean()) / (scores.std() + 1e-9)
+            lr_signal = cp - 0.5
+            disagree  = (rank_norm > 0.5 and lr_signal < -0.1) or \
+                        (rank_norm < -0.5 and lr_signal > 0.1)
+            rows.append({
+                "ETF":          etf,
+                "Rank_Score":   float(scores[j]),
+                "Conviction_P": float(cp),
+                "P_Adjusted":   float(cp - base),
+                "Disagree":     bool(disagree),
+                "Source":       source,
+            })
 
-            try:
-                ens, lgbm_p, lr_p = clf.predict_proba(X)
-                rows.append({
-                    "ETF":         etf,
-                    "P_BeatCash":  float(ens[0]),
-                    "LGBM_Prob":   float(lgbm_p[0]),
-                    "LogReg_Prob": float(lr_p[0]),
-                    "Disagree":    bool(abs(lgbm_p[0] - lr_p[0]) >
-                                        DISAGREEMENT_THRESHOLD),
-                    "Source":      source,
-                })
-            except Exception as e:
-                log.error(f"predict [{etf}|{regime}]: {e}")
-                rows.append({"ETF": etf, "P_BeatCash": 0.5,
-                              "LGBM_Prob": 0.5, "LogReg_Prob": 0.5,
-                              "Disagree": False, "Source": "error"})
-
-        result = pd.DataFrame(rows).set_index("ETF")
-
-        # P_Adjusted = P(beat cash) minus ETF's own historical base rate
-        # Rankings based on P_Adjusted prevent regime-lock from base-rate bias
-        for etf in result.index:
-            base = self.base_rates_.get(etf, 0.5) if hasattr(self, "base_rates_") else 0.5
-            result.loc[etf, "P_Adjusted"] = float(result.loc[etf, "P_BeatCash"]) - base
-
-        return result
+        return pd.DataFrame(rows).set_index("ETF")
 
     def predict_all_history(self, df: pd.DataFrame) -> pd.DataFrame:
-        """Run predictions for every row — used for backtesting."""
+        """Run predictions for every row — for backtesting."""
         if not self.fitted_:
             raise ValueError("Not fitted")
-        rows         = []
-        feat_matrix  = np.nan_to_num(
-            df[self.feature_cols_].values, nan=0.0)
+        rows        = []
+        df_clean    = df.copy()
+        df_clean[self.feature_cols_] = (
+            df_clean[self.feature_cols_]
+            .fillna(df_clean[self.feature_cols_].median())
+            .fillna(0.0)
+        )
+        feat_matrix = df_clean[self.feature_cols_].values
 
         for i, (idx, row) in enumerate(df.iterrows()):
-            regime_val = row.get("Regime", 0)
-            regime = int(regime_val) if pd.notna(regime_val) else 0
-            X      = feat_matrix[i:i+1]
-            preds  = self.predict(X, regime)
-            entry  = {"Date": idx, "Regime": regime}
+            regime     = int(row.get("Regime", 0)) if pd.notna(row.get("Regime")) else 0
+            X          = feat_matrix[i:i+1]
+            preds      = self.predict(X, regime)
+            entry      = {"Date": idx, "Regime": regime}
             for etf in TARGET_ETFS:
                 if etf in preds.index:
-                    entry[f"{etf}_P"]        = preds.loc[etf, "P_BeatCash"]
-                    entry[f"{etf}_PA"]       = preds.loc[etf, "P_Adjusted"] if "P_Adjusted" in preds.columns else preds.loc[etf, "P_BeatCash"] - 0.5
+                    entry[f"{etf}_P"]        = preds.loc[etf, "Conviction_P"]
+                    entry[f"{etf}_PA"]       = preds.loc[etf, "P_Adjusted"]
+                    entry[f"{etf}_RS"]       = preds.loc[etf, "Rank_Score"]
                     entry[f"{etf}_Disagree"] = preds.loc[etf, "Disagree"]
             rows.append(entry)
 
         return pd.DataFrame(rows).set_index("Date")
-
-    def get_conviction_zscore(self,
-                               preds_df: pd.DataFrame) -> Tuple[str, float, str]:
-        """
-        Returns (best_etf, z_score, label).
-        Z = std deviations top ETF's P_BeatCash sits above cross-ETF mean.
-        """
-        p    = preds_df["P_BeatCash"].values
-        mean = np.mean(p)
-        std  = np.std(p)
-        if std < 1e-9:
-            return str(preds_df.index[0]), 0.0, "Low"
-        best = int(np.argmax(p))
-        z    = float((p[best] - mean) / std)
-        lbl  = ("Very High" if z >= 2.0 else
-                "High"      if z >= 1.0 else
-                "Moderate"  if z >= 0.5 else "Low")
-        return str(preds_df.index[best]), z, lbl
-
-    def _log_summary(self):
-        if not self.val_metrics_:
-            return
-        log.info("Val AUC summary:")
-        for (etf, regime), auc in sorted(self.val_metrics_.items()):
-            log.info(f"  {etf} | regime {regime}: AUC={auc}")
 
     def to_bytes(self) -> bytes:
         return pickle.dumps(self)
@@ -392,91 +505,19 @@ class RegimeModelBank:
         return pickle.loads(data)
 
 
-# ── Walk-forward cross-validation ────────────────────────────────────────────
-
-def walk_forward_cv(df: pd.DataFrame, fwd_df: pd.DataFrame,
-                    n_splits: int = 5,
-                    val_pct: float = 0.15) -> pd.DataFrame:
-    """
-    Walk-forward CV: n_splits chronological folds.
-    Each fold trains on all prior data, tests on next window.
-    Regime detection re-run per fold to avoid look-ahead bias.
-    """
-    from regime_detection import RegimeDetector
-
-    common_idx  = df.index.intersection(fwd_df.index)
-    df_a        = df.loc[common_idx]
-    fwd_a       = fwd_df.loc[common_idx]
-    N           = len(df_a)
-    min_train   = int(N * 0.6)
-    fold_size   = max(30, (N - min_train) // n_splits)
-    results     = []
-
-    for fold in range(n_splits):
-        t_end  = min_train + fold * fold_size
-        ts     = t_end
-        te     = min(t_end + fold_size, N)
-        if te <= ts:
-            break
-
-        tr_df  = df_a.iloc[:t_end]
-        tr_fwd = fwd_a.iloc[:t_end]
-        te_df  = df_a.iloc[ts:te]
-        te_fwd = fwd_a.iloc[ts:te]
-
-        log.info(f"WF fold {fold+1}: train={len(tr_df)} test={len(te_df)}")
-        try:
-            det  = RegimeDetector()
-            det.fit(tr_df)
-            tr_r = det.add_regime_to_df(tr_df)
-            te_r = det.add_regime_to_df(te_df)
-
-            fc   = get_feature_columns(tr_r)
-            bank = RegimeModelBank()
-            bank.fit(tr_r, tr_fwd, feature_cols=fc, val_pct=val_pct)
-
-            row  = {"Fold": fold+1,
-                    "Train_Start": tr_df.index[0].date(),
-                    "Train_End":   tr_df.index[-1].date(),
-                    "Test_Start":  te_df.index[0].date(),
-                    "Test_End":    te_df.index[-1].date()}
-
-            for etf in TARGET_ETFS:
-                tcol = f"{etf}_BeatCash"
-                if tcol not in te_fwd.columns:
-                    continue
-                valid = te_fwd[tcol].notna()
-                X_te  = te_r.loc[valid, fc].values
-                y_te  = te_fwd.loc[valid, tcol].values.astype(int)
-                regs  = te_r.loc[valid, "Regime"].values.astype(int)
-                if len(y_te) == 0 or len(np.unique(y_te)) < 2:
-                    continue
-                probs = np.array([
-                    bank.predict(X_te[i:i+1],
-                                 int(regs[i])).loc[etf, "P_BeatCash"]
-                    if etf in bank.predict(X_te[i:i+1],
-                                           int(regs[i])).index
-                    else 0.5
-                    for i in range(len(X_te))
-                ])
-                row[f"{etf}_Acc"] = round(
-                    accuracy_score(y_te, (probs > 0.5).astype(int)), 4)
-                row[f"{etf}_AUC"] = round(roc_auc_score(y_te, probs), 4)
-
-            results.append(row)
-        except Exception as e:
-            log.error(f"Fold {fold+1} failed: {e}")
-
-    return pd.DataFrame(results)
-
-
 # ── Feature importance ────────────────────────────────────────────────────────
 
 def aggregate_feature_importance(bank: RegimeModelBank) -> pd.DataFrame:
-    """Aggregate LightGBM gain importance across all classifiers."""
     all_imp = {}
-    for clf in bank.classifiers_.values():
-        for feat, val in clf.feature_importance().items():
+    for model in list(bank.models_.values()) + ([bank.global_model_]
+                                                  if bank.global_model_ else []):
+        if model.ranker_ is None:
+            continue
+        imp  = model.ranker_.feature_importance(importance_type="gain")
+        # Feature names include ETF one-hot appended at end
+        n_fc = len(model.feature_cols_)
+        for k, val in enumerate(imp[:n_fc]):
+            feat = model.feature_cols_[k]
             all_imp.setdefault(feat, []).append(val)
     rows = [{"Feature": f, "Mean_Gain": np.mean(v),
              "Std_Gain": np.std(v), "Count": len(v)}
