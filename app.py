@@ -166,6 +166,10 @@ with st.spinner("📥 Loading dataset from GitLab..."):
         st.error(f"❌ Data load failed: {e}")
         st.stop()
 
+# ── Refresh button handler ───────────────────────────────────────────────────
+if "refresh_status" not in st.session_state:
+    st.session_state.refresh_status = None
+
 if refresh_btn:
     with st.spinner("🔄 Fetching latest data from FRED + yfinance..."):
         try:
@@ -173,13 +177,20 @@ if refresh_btn:
             df_fresh = _get_data(start_year=start_year, force_refresh=True)
             st.cache_data.clear()
             st.cache_resource.clear()
-            st.success(
+            st.session_state.refresh_status = (
+                "ok",
                 f"✅ Data refreshed — current to **{df_fresh.index[-1].date()}** "
-                f"({len(df_fresh):,} rows). Reloading..."
+                f"({len(df_fresh):,} rows × {df_fresh.shape[1]} cols)"
             )
-            st.rerun()
         except Exception as e:
-            st.error(f"❌ Refresh failed: {e}")
+            st.session_state.refresh_status = ("err", f"❌ Refresh failed: {e}")
+
+if st.session_state.refresh_status:
+    status, msg = st.session_state.refresh_status
+    if status == "ok":
+        st.success(msg)
+    else:
+        st.error(msg)
 
 # ── Load models from GitLab ───────────────────────────────────────────────────
 with st.spinner("🧠 Loading models from GitLab..."):
