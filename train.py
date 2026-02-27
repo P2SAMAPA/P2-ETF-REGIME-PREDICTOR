@@ -183,10 +183,12 @@ def run_pipeline(force_refresh: bool = False,
     log.info("Step 6: Running backtest...")
 
     # Daily return columns for strategy execution
-    ret_cols    = {f"{t}_Ret": t for t in TARGET_ETFS}
-    daily_rets  = df[[c for c in ret_cols if c in df.columns]].rename(
-        columns={c: c for c in ret_cols}
-    )
+    ret_cols   = [f"{t}_Ret" for t in TARGET_ETFS if f"{t}_Ret" in df.columns]
+    # Also include benchmarks for context
+    for b in ["SPY_Ret", "AGG_Ret"]:
+        if b in df.columns:
+            ret_cols.append(b)
+    daily_rets = df[ret_cols]
 
     regime_series = df["Regime_Name"] if "Regime_Name" in df.columns else None
 
