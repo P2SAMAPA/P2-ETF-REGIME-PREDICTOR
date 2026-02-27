@@ -26,11 +26,11 @@ _EST = pytz.timezone("US/Eastern")
 
 log = logging.getLogger(__name__)
 
-TARGET_ETFS = ["TLT", "TBT", "VNQ", "SLV", "GLD"]
+TARGET_ETFS = ["TLT", "TBT", "VNQ", "SLV", "GLD", "LQD", "HYG"]
 
 
-# Fixed Z threshold — 1.0 sigma across all regimes
-DEFAULT_Z_MIN = 1.0
+# Fixed Z threshold — 0.7 sigma across all regimes
+DEFAULT_Z_MIN = 0.7
 
 def compute_conviction(p_beat_cash: np.ndarray) -> Tuple[int, float, str]:
     """Conviction Z-score from P(beat cash) array. Returns (best_idx, z, label)."""
@@ -91,7 +91,7 @@ def execute_strategy(
     audit_trail   = []
     recent_rets   = []       # last 2 ACTIVE ETF returns for 2-day stop
     etf_rets_buf  = []       # last 10 active ETF returns for HWM stop
-    top_pick_rets = []
+    # top_pick_rets removed (rotation disabled)
     stop_active   = False
     cum_ret       = 1.0
     rotated_idx   = None
@@ -139,14 +139,10 @@ def execute_strategy(
         top_ret_col = f"{TARGET_ETFS[best_idx]}_Ret"
         top_actual  = float(ret_a.iloc[i].get(top_ret_col, 0.0))
 
-        # Rotation: 5-day cumulative loss on top pick -> rotate to #2
-        if rotated_idx is not None and top_actual > 0:
-            rotated_idx = None
-        if rotated_idx is None and len(top_pick_rets) >= 5:
-            if np.prod([1 + r for r in top_pick_rets[-5:]]) - 1 < 0:
-                rotated_idx = second_idx
-
-        active_idx      = rotated_idx if rotated_idx is not None else best_idx
+        # Rotation disabled — audit showed it consistently rotated into
+        # wrong ETFs (especially TBT in Risk-On), hurting performance
+        rotated_idx = None
+        active_idx  = best_idx
         etf_name        = TARGET_ETFS[active_idx]
         active_disagree = bool(dis_arr[active_idx])
         effective_z     = day_z * 0.5 if active_disagree else day_z
@@ -206,9 +202,7 @@ def execute_strategy(
         if len(etf_rets_buf) > 10:
             etf_rets_buf.pop(0)
 
-        top_pick_rets.append(top_actual)
-        if len(top_pick_rets) > 5:
-            top_pick_rets.pop(0)
+        # top_pick_rets buffer removed (rotation disabled)
 
         # Audit trail — closed days only
         td_val = trade_date.date() if hasattr(trade_date, "date") else trade_date
