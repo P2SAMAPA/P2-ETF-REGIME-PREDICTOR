@@ -26,7 +26,7 @@ _EST = pytz.timezone("US/Eastern")
 
 log = logging.getLogger(__name__)
 
-TARGET_ETFS = ["TLT", "TBT", "VNQ", "SLV", "GLD", "LQD", "HYG"]
+TARGET_ETFS = ["TLT", "VNQ", "SLV", "GLD", "LQD", "HYG"]
 
 
 # Fixed Z threshold — 0.7 sigma across all regimes
@@ -50,10 +50,11 @@ def compute_conviction(p_beat_cash: np.ndarray) -> Tuple[int, float, str]:
 # Tighter stops for leveraged/volatile instruments
 ETF_STOP_MULTIPLIER = {
     "TLT": 1.00,   # Full stop — standard bond ETF
-    "TBT": 0.50,   # Half stop — 2x leveraged inverse
     "VNQ": 1.00,   # Full stop — standard REIT ETF
     "SLV": 0.75,   # 75% stop — commodity volatility
     "GLD": 0.75,   # 75% stop — commodity volatility
+    "LQD": 1.00,   # Full stop — IG corporate bonds
+    "HYG": 0.85,   # Slightly tighter — HY has higher vol
 }
 
 def execute_strategy(
