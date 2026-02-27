@@ -380,6 +380,22 @@ def compute_macro_features(df: pd.DataFrame) -> pd.DataFrame:
         new_cols["USD_Ret5d"]  = df["DTWEXBGS"].pct_change(5)
         new_cols["USD_Ret21d"] = df["DTWEXBGS"].pct_change(21)
 
+    # Cross-ETF relative momentum features
+    # Gives LambdaRank direct signals about which ETF is currently winning
+    etf_pairs = [
+        ("SLV", "VNQ"), ("SLV", "TBT"), ("SLV", "TLT"),
+        ("GLD", "TBT"), ("GLD", "VNQ"), ("TBT", "TLT"),
+        ("TBT", "VNQ"),
+    ]
+    for e1, e2 in etf_pairs:
+        r1_5  = new_cols.get(f"{e1}_Ret", pd.Series(dtype=float)).rolling(5).mean()
+        r2_5  = new_cols.get(f"{e2}_Ret", pd.Series(dtype=float)).rolling(5).mean()
+        r1_21 = new_cols.get(f"{e1}_Ret", pd.Series(dtype=float)).rolling(21).mean()
+        r2_21 = new_cols.get(f"{e2}_Ret", pd.Series(dtype=float)).rolling(21).mean()
+        if not r1_5.empty and not r2_5.empty:
+            new_cols[f"{e1}_vs_{e2}_5d"]  = r1_5  - r2_5
+            new_cols[f"{e1}_vs_{e2}_21d"] = r1_21 - r2_21
+
     # Rolling Z-scores for all macro series + derived
     zscore_targets = list(FRED_SERIES.keys()) + list(new_cols.keys())
     z_new = {}
