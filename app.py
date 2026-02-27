@@ -38,7 +38,8 @@ try:
     from data_manager import (
         get_data, build_forward_targets,
         load_signals_from_gitlab, load_model_from_gitlab,
-        load_feature_list_from_gitlab, TARGET_ETFS,
+        load_feature_list_from_gitlab, load_predictions_from_gitlab,
+        TARGET_ETFS,
     )
     from regime_detection import RegimeDetector
     from models import RegimeModelBank
@@ -50,6 +51,38 @@ try:
 except Exception as e:
     st.error(f"❌ Import error: {e}")
     st.stop()
+
+# ── Cached loaders (prevent re-running on every widget interaction) ──────────
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def cached_get_data(start_year, force=False):
+    return get_data(start_year=start_year, force_refresh=force)
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def cached_load_predictions():
+    return load_predictions_from_gitlab()
+
+@st.cache_resource(ttl=3600, show_spinner=False)
+def cached_load_detector():
+    data = load_model_from_gitlab("regime_detector.pkl")
+    if data:
+        return RegimeDetector.from_bytes(data)
+    return None
+
+@st.cache_resource(ttl=3600, show_spinner=False)
+def cached_load_bank():
+    data = load_model_from_gitlab("model_bank.pkl")
+    if data:
+        return RegimeModelBank.from_bytes(data)
+    return None
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def cached_load_feature_list():
+    return load_feature_list_from_gitlab()
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def cached_load_signals():
+    return load_signals_from_gitlab()
 
 # ── Constants ─────────────────────────────────────────────────────────────────
 BENCHMARK_COLS = {"SPY": "SPY_Ret", "AGG": "AGG_Ret"}
@@ -123,42 +156,37 @@ if not run_btn:
     st.stop()
 
 # ── Load data ─────────────────────────────────────────────────────────────────
+if refresh_btn:
+    st.cache_data.clear()
+    st.cache_resource.clear()
+
 with st.spinner("📥 Loading dataset from GitLab..."):
     try:
-        force = refresh_btn
-        df = get_data(start_year=start_year, force_refresh=force)
+        df = cached_get_data(start_year, force=refresh_btn)
         st.success(f"✅ Dataset: {len(df):,} rows × {df.shape[1]} cols "
                    f"({df.index[0].date()} → {df.index[-1].date()})")
+        if refresh_btn:
+            st.info(f"🔄 Data refreshed — current to **{df.index[-1].date()}**")
     except Exception as e:
-        st.error(f"❌ Data load failed: {e}")
+        st.error(f"❌ Data load failed — using cached data if available: {e}")
         st.stop()
 
 # ── Load models from GitLab ───────────────────────────────────────────────────
 with st.spinner("🧠 Loading models from GitLab..."):
-    detector = None
-    bank     = None
+    detector = cached_load_detector()
+    bank     = cached_load_bank()
 
-    try:
-        det_bytes = load_model_from_gitlab("regime_detector.pkl")
-        if det_bytes:
-            detector = RegimeDetector.from_bytes(det_bytes)
-            st.success(f"✅ Regime detector loaded (k={detector.optimal_k_})")
-        else:
-            st.warning("⚠️ Regime detector not found — run pipeline first")
-    except Exception as e:
-        st.warning(f"⚠️ Regime detector load failed: {e}")
+    if detector:
+        st.success(f"✅ Regime detector loaded (k={detector.optimal_k_})")
+    else:
+        st.warning("⚠️ Regime detector not found — run pipeline first")
 
-    try:
-        bank_bytes = load_model_from_gitlab("model_bank.pkl")
-        if bank_bytes:
-            bank = RegimeModelBank.from_bytes(bank_bytes)
-            st.success(f"✅ Model bank loaded "
-                       f"({len(bank.classifiers_)} regime classifiers + "
-                       f"{len(bank.global_classifiers_)} global fallbacks)")
-        else:
-            st.warning("⚠️ Model bank not found — run pipeline first")
-    except Exception as e:
-        st.warning(f"⚠️ Model bank load failed: {e}")
+    if bank:
+        st.success(f"✅ Model bank loaded "
+                   f"({len(bank.classifiers_)} regime classifiers + "
+                   f"{len(bank.global_classifiers_)} global fallbacks)")
+    else:
+        st.warning("⚠️ Model bank not found — run pipeline first")
 
 if detector is None or bank is None:
     st.error("Models not available. Trigger Manual Retrain in GitHub Actions first.")
@@ -197,23 +225,29 @@ with st.spinner("🔍 Applying regime labels..."):
         regime_int, regime_name = 0, "Unknown"
 
 # ── Generate prediction history ───────────────────────────────────────────────
-with st.spinner("⚙️ Generating predictions..."):
+with st.spinner("📡 Loading predictions from GitLab..."):
     try:
-        feature_cols = load_feature_list_from_gitlab()
+        feature_cols = cached_load_feature_list()
         if feature_cols is None:
             from models import get_feature_columns
             feature_cols = get_feature_columns(df)
 
-        # Clean features
-        feat_df = df.copy()
-        feat_df[feature_cols] = (feat_df[feature_cols]
-                                  .fillna(feat_df[feature_cols].median())
-                                  .fillna(0.0))
+        pred_history = cached_load_predictions()
 
-        pred_history = bank.predict_all_history(feat_df)
-        st.success(f"✅ Predictions: {len(pred_history):,} rows")
+        if pred_history is None:
+            # Fallback: generate in app (slow — only if GitLab file missing)
+            st.warning("⚠️ Pre-computed predictions not found — generating now (slow)...")
+            feat_df = df.copy()
+            feat_df[feature_cols] = (feat_df[feature_cols]
+                                      .fillna(feat_df[feature_cols].median())
+                                      .fillna(0.0))
+            pred_history = bank.predict_all_history(feat_df)
+            st.info("💡 Tip: Trigger Manual Retrain in GitHub Actions to pre-compute predictions")
+        else:
+            st.success(f"✅ Predictions loaded: {len(pred_history):,} rows "
+                       f"(current to {pred_history.index[-1].date()})")
     except Exception as e:
-        st.error(f"❌ Prediction failed: {e}")
+        st.error(f"❌ Prediction load failed: {e}")
         st.stop()
 
 # ── Execute strategy ──────────────────────────────────────────────────────────
@@ -514,7 +548,7 @@ st.divider()
 st.subheader("📡 Signal History (from GitLab)")
 
 try:
-    sig_df = load_signals_from_gitlab()
+    sig_df = cached_load_signals()
     if sig_df is not None and not sig_df.empty:
         st.dataframe(sig_df.tail(20).sort_index(ascending=False),
                      use_container_width=True)
