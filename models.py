@@ -20,11 +20,17 @@ import pickle
 import warnings
 import numpy as np
 import pandas as pd
-from typing import Optional, Tuple, Dict, List
+from typing import Optional, Tuple, Dict, List, Any
 from scipy.stats import spearmanr
 
 import lightgbm as lgb
-from sklearn.linear_model import LogisticRegression
+try:
+    import xgboost as xgb
+    HAS_XGB = True
+except ImportError:
+    HAS_XGB = False
+    log.warning("xgboost not installed — Layer 2A will use LambdaRank + Ridge only")
+from sklearn.linear_model import LogisticRegression, Ridge
 from sklearn.preprocessing import RobustScaler
 from sklearn.metrics import roc_auc_score
 from sklearn.exceptions import ConvergenceWarning
@@ -39,6 +45,21 @@ MIN_REGIME_ROWS        = 100
 FORWARD_HORIZONS       = [5, 10, 15, 20]
 DISAGREEMENT_THRESHOLD = 0.15
 TARGET_ETFS            = ["TLT", "TBT", "VNQ", "SLV", "GLD"]
+
+# XGBoost ranking params
+XGB_RANK_PARAMS = {
+    "objective":        "rank:pairwise",
+    "eval_metric":      "ndcg",
+    "learning_rate":    0.05,
+    "max_depth":        4,
+    "n_estimators":     300,
+    "subsample":        0.8,
+    "colsample_bytree": 0.8,
+    "reg_alpha":        0.1,
+    "reg_lambda":       0.1,
+    "random_state":     RANDOM_SEED,
+    "verbosity":        0,
+}
 
 # LambdaRank params — optimises ranking directly
 LGBM_RANK_PARAMS = {
@@ -145,6 +166,8 @@ class RegimeRankingModel:
         self.regime       = regime
         self.regime_name  = regime_name
         self.ranker_      = None      # LightGBM LambdaRank
+        self.xgb_ranker_  = None      # XGBoost pairwise ranking
+        self.ridge_ranker_: Dict[str, Any] = {}  # Ridge per ETF
         self.logregs_     : Dict[str, LogisticRegression] = {}
         self.scaler_      = RobustScaler()
         self.feature_cols_= []
@@ -251,6 +274,38 @@ class RegimeRankingModel:
             log.error(f"  LambdaRank fit failed regime {self.regime}: {e}")
             return self
 
+        # ── XGBoost pairwise ranking ──────────────────────────────────────
+        if HAS_XGB and len(X_rank_tr) >= 50:
+            try:
+                self.xgb_ranker_ = xgb.XGBRanker(**XGB_RANK_PARAMS)
+                self.xgb_ranker_.fit(
+                    X_rank_tr, y_rank_tr,
+                    group=q_tr_arr,
+                    eval_set=[(X_rank_va, y_rank_va)],
+                    eval_group=[q_va_arr],
+                    verbose=False,
+                )
+                log.info(f"  XGBoost ranker fitted: regime {self.regime}")
+            except Exception as e:
+                log.warning(f"  XGBoost fit failed: {e}")
+
+        # ── Ridge regression ranker (one per ETF, predicts fwd return) ────
+        for j, etf in enumerate(TARGET_ETFS):
+            fwd_col = f"{etf}_FwdRet{h}d"
+            if fwd_col not in fwd_train.columns:
+                continue
+            valid_mask = fwd_train[fwd_col].notna()
+            if valid_mask.sum() < 50:
+                continue
+            y_ridge = fwd_train.loc[valid_mask, fwd_col].values
+            n_ridge = min(len(X_train_s), valid_mask.sum())
+            try:
+                ridge = Ridge(alpha=1.0)
+                ridge.fit(X_train_s[:n_ridge], y_ridge[:n_ridge])
+                self.ridge_ranker_[etf] = ridge
+            except Exception as e:
+                log.warning(f"  Ridge fit failed {etf}: {e}")
+
         # Per-ETF LogReg for conviction signal
         beat_cols = [f"{t}_BeatCash{h}d" for t in TARGET_ETFS]
         for j, etf in enumerate(TARGET_ETFS):
@@ -278,22 +333,59 @@ class RegimeRankingModel:
         return self
 
     def predict_scores(self, X: np.ndarray) -> np.ndarray:
-        """
-        Returns ranking scores for each ETF (higher = model prefers this ETF).
-        Shape: (n_etfs,)
-        """
-        if self.ranker_ is None:
-            return np.zeros(len(TARGET_ETFS))
-
-        X_s      = self.scaler_.transform(X)
-        n_etfs   = len(TARGET_ETFS)
-        onehot   = np.eye(n_etfs)
-        X_rank   = np.array([
+        # Majority voting across LambdaRank + XGBoost + Ridge.
+        # Returns combined ranking scores. Shape: (n_etfs,)
+        n_etfs  = len(TARGET_ETFS)
+        X_s     = self.scaler_.transform(X)
+        onehot  = np.eye(n_etfs)
+        X_rank  = np.array([
             np.concatenate([X_s[0], onehot[j]])
             for j in range(n_etfs)
         ])
-        scores = self.ranker_.predict(X_rank)
-        return scores
+
+        model_scores = []
+        model_tops   = []
+
+        # LambdaRank
+        if self.ranker_ is not None:
+            s = self.ranker_.predict(X_rank)
+            model_scores.append(s / (np.std(s) + 1e-9))
+            model_tops.append(int(np.argmax(s)))
+
+        # XGBoost
+        if self.xgb_ranker_ is not None:
+            try:
+                s = self.xgb_ranker_.predict(X_rank)
+                model_scores.append(s / (np.std(s) + 1e-9))
+                model_tops.append(int(np.argmax(s)))
+            except Exception:
+                pass
+
+        # Ridge (predict fwd return per ETF, normalised)
+        if self.ridge_ranker_:
+            ridge_scores = np.zeros(n_etfs)
+            for j, etf in enumerate(TARGET_ETFS):
+                if etf in self.ridge_ranker_:
+                    ridge_scores[j] = float(
+                        self.ridge_ranker_[etf].predict(X_s)[0]
+                    )
+            if ridge_scores.std() > 1e-9:
+                model_scores.append(ridge_scores / (ridge_scores.std() + 1e-9))
+                model_tops.append(int(np.argmax(ridge_scores)))
+
+        if not model_scores:
+            self.last_votes_    = []
+            self.last_majority_ = False
+            return np.zeros(n_etfs)
+
+        combined            = np.mean(model_scores, axis=0)
+        self.last_votes_    = model_tops
+        top                 = int(np.argmax(combined))
+        vote_counts         = np.bincount(model_tops, minlength=n_etfs)
+        # Majority = top ETF agreed by >= half of models
+        self.last_majority_ = bool(vote_counts[top] >= max(1, len(model_tops) / 2))
+
+        return combined
 
     def predict_conviction(self, X: np.ndarray) -> Dict[str, float]:
         """Returns LogReg P(beat cash) per ETF for conviction overlay."""
@@ -444,29 +536,32 @@ class RegimeModelBank:
                     for etf in TARGET_ETFS]
             return pd.DataFrame(rows).set_index("ETF")
 
-        source   = f"regime_{regime}" if regime in self.models_ else "global"
-        scores   = model.predict_scores(X)
-        conv     = model.predict_conviction(X)
+        source     = f"regime_{regime}" if regime in self.models_ else "global"
+        scores     = model.predict_scores(X)
+        conv       = model.predict_conviction(X)
+
+        # Majority voting disagreement
+        majority   = getattr(model, "last_majority_", True)
+        last_votes = getattr(model, "last_votes_", [])
+        top_idx    = int(np.argmax(scores))
 
         rows = []
         for j, etf in enumerate(TARGET_ETFS):
-            base    = self.base_rates_.get(etf, 0.5)
-            cp      = conv.get(etf, 0.5)
-            # Disagreement: ranking score direction vs logistic conviction
-            # High rank score but low LogReg conviction = uncertain
-            rank_norm = (scores[j] - scores.mean()) / (scores.std() + 1e-9)
-            lr_signal = cp - 0.5
-            disagree  = (rank_norm > 0.5 and lr_signal < -0.1) or \
-                        (rank_norm < -0.5 and lr_signal > 0.1)
+            base     = self.base_rates_.get(etf, 0.5)
+            cp       = conv.get(etf, 0.5)
+            disagree = (j == top_idx) and not majority
+            votes    = int(np.bincount(last_votes, minlength=len(TARGET_ETFS))[j]) if last_votes else 0
             rows.append({
                 "ETF":          etf,
                 "Rank_Score":   float(scores[j]),
                 "Conviction_P": float(cp),
                 "P_Adjusted":   float(cp - base),
                 "Disagree":     bool(disagree),
+                "Votes":        votes,
                 "Source":       source,
             })
 
+        return pd.DataFrame(rows).set_index("ETF")
         return pd.DataFrame(rows).set_index("ETF")
 
     def predict_all_history(self, df: pd.DataFrame) -> pd.DataFrame:
@@ -525,3 +620,113 @@ def aggregate_feature_importance(bank: RegimeModelBank) -> pd.DataFrame:
     return (pd.DataFrame(rows)
             .sort_values("Mean_Gain", ascending=False)
             .reset_index(drop=True))
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# LAYER 2B — PURE MOMENTUM RANKER
+# ═══════════════════════════════════════════════════════════════════════════════
+
+class MomentumRanker:
+    """
+    Layer 2B: Rules-based ETF ranking using Rate-of-Change momentum.
+
+    Ranks ETFs by composite momentum score:
+      - RoC 5d, 10d, 21d, 63d (weighted: recent > distant)
+      - OBV accumulation (volume confirms price move)
+      - Breakout score (price vs 20d range)
+
+    No ML, no regime-specific models — fully transparent and rules-based.
+    Z-score computed from cross-ETF momentum spread.
+    """
+
+    # RoC weights — heavier on recent
+    ROC_WEIGHTS = {5: 0.40, 10: 0.30, 21: 0.20, 63: 0.10}
+    OBV_WEIGHT       = 0.15
+    BREAKOUT_WEIGHT  = 0.15
+    MOMENTUM_WEIGHT  = 0.70   # ROC composite weight in final score
+
+    def __init__(self):
+        self.feature_cols_: List[str] = []
+        self.fitted_       = False
+        self.scaler_obv_   = RobustScaler()
+
+    def fit(self, df: pd.DataFrame, **kwargs) -> "MomentumRanker":
+        # Fit OBV scaler for normalisation
+        obv_cols = [f"{t}_OBV21d" for t in TARGET_ETFS
+                    if f"{t}_OBV21d" in df.columns]
+        if obv_cols:
+            self.scaler_obv_.fit(df[obv_cols].fillna(0).values)
+        self.fitted_ = True
+        log.info("MomentumRanker fitted")
+        return self
+
+    def score_row(self, row: pd.Series) -> Dict[str, float]:
+        """
+        Compute momentum score per ETF for a single row.
+        Returns dict {etf: score} — higher = stronger momentum.
+        """
+        scores = {}
+        for etf in TARGET_ETFS:
+            # 1. RoC composite
+            roc_score = 0.0
+            for n, w in self.ROC_WEIGHTS.items():
+                val = float(row.get(f"{etf}_RoC{n}d", 0.0) or 0.0)
+                roc_score += w * val
+
+            # 2. OBV normalised (positive = accumulation)
+            obv_raw = float(row.get(f"{etf}_OBV21d", 0.0) or 0.0)
+            obv_norm = np.tanh(obv_raw / (abs(obv_raw) + 1e-6)) if obv_raw != 0 else 0.0
+
+            # 3. Breakout score (0-1, 1 = at 20d high)
+            breakout = float(row.get(f"{etf}_Breakout20d", 0.5) or 0.5)
+
+            scores[etf] = (
+                self.MOMENTUM_WEIGHT  * roc_score +
+                self.OBV_WEIGHT       * obv_norm  +
+                self.BREAKOUT_WEIGHT  * (breakout - 0.5)
+            )
+        return scores
+
+    def predict(self, row: pd.Series) -> pd.DataFrame:
+        """
+        Returns DataFrame indexed by ETF with columns:
+        Rank_Score, P_Adjusted, Disagree, Source
+        """
+        scores    = self.score_row(row)
+        vals      = np.array(list(scores.values()))
+        mean, std = vals.mean(), vals.std()
+
+        rows = []
+        for etf in TARGET_ETFS:
+            s = scores[etf]
+            rows.append({
+                "ETF":          etf,
+                "Rank_Score":   float(s),
+                "Conviction_P": float(np.clip(0.5 + (s - mean) / (std + 1e-9) * 0.1, 0, 1)),
+                "P_Adjusted":   float(s - mean),
+                "Disagree":     False,   # pure rules — no disagreement
+                "Source":       "momentum",
+            })
+        return pd.DataFrame(rows).set_index("ETF")
+
+    def predict_all_history(self, df: pd.DataFrame) -> pd.DataFrame:
+        rows = []
+        for idx, row in df.iterrows():
+            regime = int(row.get("Regime", 0)) if pd.notna(row.get("Regime")) else 0
+            preds  = self.predict(row)
+            entry  = {"Date": idx, "Regime": regime}
+            for etf in TARGET_ETFS:
+                if etf in preds.index:
+                    entry[f"{etf}_P"]        = preds.loc[etf, "Conviction_P"]
+                    entry[f"{etf}_PA"]       = preds.loc[etf, "P_Adjusted"]
+                    entry[f"{etf}_RS"]       = preds.loc[etf, "Rank_Score"]
+                    entry[f"{etf}_Disagree"] = False
+            rows.append(entry)
+        return pd.DataFrame(rows).set_index("Date")
+
+    def to_bytes(self) -> bytes:
+        return pickle.dumps(self)
+
+    @staticmethod
+    def from_bytes(data: bytes) -> "MomentumRanker":
+        return pickle.loads(data)
