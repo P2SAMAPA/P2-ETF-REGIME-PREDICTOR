@@ -43,7 +43,7 @@ from data_manager import (
     load_model_from_gitlab, TARGET_ETFS,
 )
 from regime_detection import RegimeDetector
-from models import RegimeModelBank, get_feature_columns
+from models import RegimeModelBank, MomentumRanker, get_feature_columns
 from strategy import (
     execute_strategy, calculate_metrics,
     build_signal_row, TARGET_ETFS as STRAT_ETFS,
