@@ -87,14 +87,18 @@ def execute_strategy(
     pred_a       = predictions_df.loc[common_dates]
     ret_a        = daily_ret_df.loc[common_dates]
     p_cols       = [f"{t}_P"        for t in TARGET_ETFS]
+    pa_cols      = [f"{t}_PA"       for t in TARGET_ETFS]   # P_Adjusted
     dis_cols     = [f"{t}_Disagree" for t in TARGET_ETFS]
 
     for i, trade_date in enumerate(common_dates):
         row     = pred_a.iloc[i]
-        p_array = np.array([float(row.get(c, 0.5)) for c in p_cols])
-        dis_arr = np.array([bool(row.get(c, False)) for c in dis_cols])
+        p_array  = np.array([float(row.get(c, 0.5)) for c in p_cols])
+        # Use base-rate adjusted scores for ranking to avoid regime-lock
+        pa_array = np.array([float(row.get(c, p_array[i] - 0.5))
+                              for i, c in enumerate(pa_cols)])
+        dis_arr  = np.array([bool(row.get(c, False)) for c in dis_cols])
 
-        ranked     = np.argsort(p_array)[::-1]
+        ranked     = np.argsort(pa_array)[::-1]   # rank by adjusted score
         best_idx   = int(ranked[0])
         second_idx = int(ranked[1]) if len(ranked) > 1 else best_idx
         _, day_z, day_label = compute_conviction(p_array)
