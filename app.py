@@ -499,10 +499,25 @@ if "Regime_Name" in df.columns:
 # AUDIT TRAIL
 # ═════════════════════════════════════════════════════════════════════════════
 st.divider()
-st.subheader("📋 Audit Trail — Last 30 Trading Days")
+st.subheader("📋 Audit Trail")
 
 if audit_trail:
-    audit_df = pd.DataFrame(audit_trail).tail(30)
+    audit_full = pd.DataFrame(audit_trail)
+    total_days = len(audit_full)
+
+    # Controls row
+    col_a, col_b = st.columns([3, 1])
+    with col_a:
+        show_n = st.select_slider(
+            "Show last N trading days",
+            options=[30, 60, 90, 180, 365, total_days],
+            value=30,
+            format_func=lambda x: f"All {x} days" if x == total_days else f"Last {x} days"
+        )
+    with col_b:
+        st.metric("Total Days", f"{total_days:,}")
+
+    audit_df = audit_full.tail(show_n)
 
     # Colour-code Signal column
     def style_signal(val):
