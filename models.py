@@ -43,7 +43,7 @@ RANDOM_SEED            = 42
 MIN_REGIME_ROWS        = 100
 FORWARD_HORIZONS       = [5, 10, 15, 20]
 DISAGREEMENT_THRESHOLD = 0.15
-TARGET_ETFS            = ["TLT", "TBT", "VNQ", "SLV", "GLD"]
+TARGET_ETFS            = ["TLT", "TBT", "VNQ", "SLV", "GLD", "LQD", "HYG"]
 
 # XGBoost ranking params
 XGB_RANK_PARAMS = {
