@@ -21,6 +21,8 @@ import numpy as np
 import pandas as pd
 from datetime import datetime
 from typing import Optional, Tuple, List, Dict
+import pytz
+_EST = pytz.timezone("US/Eastern")
 
 log = logging.getLogger(__name__)
 
@@ -69,7 +71,9 @@ def execute_strategy(
              conviction_z, conviction_label, last_p_array)
     """
     daily_rf      = rf_rate / 252
-    today         = datetime.now().date()
+    now_est       = datetime.now(_EST)
+    today         = now_est.date()
+    market_closed = now_est.hour >= 16   # after 4pm EST market is closed
     fee           = fee_bps / 10_000
     strat_rets    = []
     audit_trail   = []
@@ -148,7 +152,7 @@ def execute_strategy(
 
         # Audit trail — closed days only
         td_val = trade_date.date() if hasattr(trade_date, "date") else trade_date
-        if td_val < today:
+        if td_val < today or (td_val == today and market_closed):
             rname = ""
             if regime_series is not None and trade_date in regime_series.index:
                 rname = str(regime_series.loc[trade_date])
