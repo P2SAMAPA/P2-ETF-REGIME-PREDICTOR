@@ -77,37 +77,37 @@ def execute_strategy(
     fee           = fee_bps / 10_000
     strat_rets    = []
     audit_trail   = []
-    recent_rets   = []
+    recent_rets   = []       # last 2 ACTIVE ETF returns for 2-day stop
+    etf_rets_buf  = []       # last 10 active ETF returns for HWM stop
     top_pick_rets = []
     stop_active   = False
+    cum_ret       = 1.0
     rotated_idx   = None
     p_array       = np.full(len(TARGET_ETFS), 0.5)
 
     common_dates = predictions_df.index.intersection(daily_ret_df.index)
     pred_a       = predictions_df.loc[common_dates]
     ret_a        = daily_ret_df.loc[common_dates]
-    p_cols       = [f"{t}_P"        for t in TARGET_ETFS]
-    pa_cols      = [f"{t}_PA"       for t in TARGET_ETFS]   # P_Adjusted
+    p_cols       = [f"{t}_P"  for t in TARGET_ETFS]
+    pa_cols      = [f"{t}_PA" for t in TARGET_ETFS]
     dis_cols     = [f"{t}_Disagree" for t in TARGET_ETFS]
 
     for i, trade_date in enumerate(common_dates):
-        row     = pred_a.iloc[i]
+        row      = pred_a.iloc[i]
         p_array  = np.array([float(row.get(c, 0.5)) for c in p_cols])
-        # Use base-rate adjusted scores for ranking to avoid regime-lock
-        pa_array = np.array([float(row.get(c, p_array[i] - 0.5))
-                              for i, c in enumerate(pa_cols)])
+        pa_array = np.array([float(row.get(c, p_array[j] - 0.5))
+                              for j, c in enumerate(pa_cols)])
         dis_arr  = np.array([bool(row.get(c, False)) for c in dis_cols])
 
-        ranked     = np.argsort(pa_array)[::-1]   # rank by adjusted score
+        ranked     = np.argsort(pa_array)[::-1]
         best_idx   = int(ranked[0])
         second_idx = int(ranked[1]) if len(ranked) > 1 else best_idx
         _, day_z, day_label = compute_conviction(p_array)
 
-        # Top pick actual return (for rotation tracking)
         top_ret_col = f"{TARGET_ETFS[best_idx]}_Ret"
         top_actual  = float(ret_a.iloc[i].get(top_ret_col, 0.0))
 
-        # Rotation: 5-day cumulative loss on top pick
+        # Rotation: 5-day cumulative loss on top pick -> rotate to #2
         if rotated_idx is not None and top_actual > 0:
             rotated_idx = None
         if rotated_idx is None and len(top_pick_rets) >= 5:
@@ -122,7 +122,22 @@ def execute_strategy(
         act_ret_col = f"{etf_name}_Ret"
         realized    = float(ret_a.iloc[i].get(act_ret_col, 0.0))
 
-        # Stop-loss + conviction gate
+        # ── Stop 1: 2-day stop on ACTIVE returns (not diluted by cash) ───
+        two_day_breach = (
+            len(recent_rets) >= 2 and
+            (1 + recent_rets[-2]) * (1 + recent_rets[-1]) - 1 <= stop_loss_pct
+        )
+
+        # ── Stop 2: Trailing HWM stop on active ETF returns window ───────
+        hwm_breach = False
+        if len(etf_rets_buf) >= 3:
+            cum_window = np.cumprod([1 + r for r in etf_rets_buf])
+            peak       = float(np.max(cum_window))
+            current    = float(cum_window[-1])
+            dd_window  = (current - peak) / (peak + 1e-9)
+            hwm_breach = dd_window <= stop_loss_pct * 0.75
+
+        # ── Decision ─────────────────────────────────────────────────────
         if stop_active:
             if effective_z >= z_reentry:
                 stop_active  = False
@@ -135,8 +150,7 @@ def execute_strategy(
             if effective_z < z_min_entry:
                 net_ret      = daily_rf
                 trade_signal = "CASH"
-            elif (len(recent_rets) >= 2 and
-                  (1 + recent_rets[-2]) * (1 + recent_rets[-1]) - 1 <= stop_loss_pct):
+            elif two_day_breach or hwm_breach:
                 stop_active  = True
                 net_ret      = daily_rf
                 trade_signal = "CASH"
@@ -145,11 +159,18 @@ def execute_strategy(
                 trade_signal = etf_name
 
         strat_rets.append(net_ret)
+        cum_ret *= (1 + net_ret)
 
-        # Update buffers after decision
-        recent_rets.append(net_ret)
+        # Only track ACTIVE (non-cash) ETF returns in stop buffers
+        # Prevents cash days from diluting/resetting the stop signal
+        if trade_signal != "CASH":
+            recent_rets.append(realized)
+            etf_rets_buf.append(realized)
         if len(recent_rets) > 2:
             recent_rets.pop(0)
+        if len(etf_rets_buf) > 10:
+            etf_rets_buf.pop(0)
+
         top_pick_rets.append(top_actual)
         if len(top_pick_rets) > 5:
             top_pick_rets.pop(0)
