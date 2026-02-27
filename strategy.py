@@ -160,18 +160,33 @@ def execute_strategy(
             rname = ""
             if regime_series is not None and trade_date in regime_series.index:
                 rname = str(regime_series.loc[trade_date])
-            audit_trail.append({
-                "Date":         td_val.strftime("%Y-%m-%d"),
-                "Signal":       trade_signal,
-                "Top_Pick":     TARGET_ETFS[best_idx],
-                "Regime":       rname,
-                "Conviction_Z": round(day_z, 2),
-                "P_Top":        round(float(p_array[best_idx]), 3),
-                "Net_Return%":  round(net_ret * 100, 3),
-                "Stop_Active":  stop_active,
-                "Rotated":      rotated_idx is not None,
-                "Disagree":     active_disagree,
-            })
+
+            # Get actual returns for each ETF for transparency
+            etf_rets = {}
+            for etf in TARGET_ETFS:
+                rc = f"{etf}_Ret"
+                etf_rets[f"{etf}_Ret%"] = round(
+                    float(ret_a.iloc[i].get(rc, 0.0)) * 100, 3
+                )
+
+            # Signal return = what the strategy actually earned
+            signal_ret = (realized * 100 if trade_signal != "CASH"
+                          else daily_rf * 100)
+
+            entry = {
+                "Date":           td_val.strftime("%Y-%m-%d"),
+                "Signal":         trade_signal,
+                "Top_Pick":       TARGET_ETFS[best_idx],
+                "Regime":         rname,
+                "Conviction_Z":   round(day_z, 2),
+                "P_Top":          round(float(p_array[best_idx]), 3),
+                "Signal_Ret%":    round(signal_ret, 3),
+                "Stop_Active":    stop_active,
+                "Rotated":        rotated_idx is not None,
+                "Disagree":       active_disagree,
+            }
+            entry.update(etf_rets)
+            audit_trail.append(entry)
 
     strat_rets = np.array(strat_rets)
 
