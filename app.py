@@ -101,7 +101,7 @@ with st.sidebar:
     st.header("⚙️ Configuration")
 
     start_year = st.slider(
-        "Training Start Year", min_value=2008, max_value=2020,
+        "Training Start Year", min_value=2008, max_value=2025,
         value=2008, step=1,
         help="Earlier start captures more rate cycles"
     )
@@ -156,7 +156,7 @@ mode_label = ("Option B — Momentum (RoC + Volume + Breakout)"
                "Option A — ML Ensemble (XGBoost + Ridge + LambdaRank voting)")
 st.caption(
     f"Wasserstein k-means regime detection • {mode_label} • "
-    "ETFs: TLT · VNQ · SLV · GLD . LQD . HYG"
+    "ETFs: TLT · TBT · VNQ · SLV · GLD"
 )
 
 if "refresh_status" not in st.session_state:
