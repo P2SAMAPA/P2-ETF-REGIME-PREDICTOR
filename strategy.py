@@ -43,6 +43,16 @@ def compute_conviction(p_beat_cash: np.ndarray) -> Tuple[int, float, str]:
     return best, z, label
 
 
+# Per-ETF stop multipliers applied to user's slider value
+# Tighter stops for leveraged/volatile instruments
+ETF_STOP_MULTIPLIER = {
+    "TLT": 1.00,   # Full stop — standard bond ETF
+    "TBT": 0.50,   # Half stop — 2x leveraged inverse
+    "VNQ": 1.00,   # Full stop — standard REIT ETF
+    "SLV": 0.75,   # 75% stop — commodity volatility
+    "GLD": 0.75,   # 75% stop — commodity volatility
+}
+
 def execute_strategy(
     predictions_df:  pd.DataFrame,
     daily_ret_df:    pd.DataFrame,
@@ -126,10 +136,13 @@ def execute_strategy(
         act_ret_col = f"{etf_name}_Ret"
         realized    = float(ret_a.iloc[i].get(act_ret_col, 0.0))
 
+        # Per-ETF stop — multiplier applied to user's slider value
+        etf_stop = stop_loss_pct * ETF_STOP_MULTIPLIER.get(etf_name, 1.0)
+
         # ── Stop 1: 2-day stop on ACTIVE returns (not diluted by cash) ───
         two_day_breach = (
             len(recent_rets) >= 2 and
-            (1 + recent_rets[-2]) * (1 + recent_rets[-1]) - 1 <= stop_loss_pct
+            (1 + recent_rets[-2]) * (1 + recent_rets[-1]) - 1 <= etf_stop
         )
 
         # ── Stop 2: Trailing HWM stop on active ETF returns window ───────
@@ -139,7 +152,7 @@ def execute_strategy(
             peak       = float(np.max(cum_window))
             current    = float(cum_window[-1])
             dd_window  = (current - peak) / (peak + 1e-9)
-            hwm_breach = dd_window <= stop_loss_pct * 0.75
+            hwm_breach = dd_window <= etf_stop * 0.75
 
         # ── Decision ─────────────────────────────────────────────────────
         if stop_active:
