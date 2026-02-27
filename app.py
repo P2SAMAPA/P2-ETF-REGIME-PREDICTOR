@@ -388,21 +388,28 @@ st.markdown(f"""
 
 # ── ETF probability bars ──────────────────────────────────────────────────────
 st.subheader("P(Beat Cash) — Next 5 Days")
-prob_cols = st.columns(len(TARGET_ETFS))
 
 # Get base rates from model bank if available
-base_rates = getattr(bank, "base_rates_", {t: 0.5 for t in TARGET_ETFS})
+base_rates = getattr(bank, "base_rates_", {t: 0.5 for t in TARGET_ETFS})              if bank else {t: 0.5 for t in TARGET_ETFS}
 
-for i, etf in enumerate(TARGET_ETFS):
-    p    = float(last_p[i]) if i < len(last_p) else 0.5
-    base = base_rates.get(etf, 0.5)
-    adj  = p - base   # excess above historical base rate
-    prob_cols[i].metric(
-        label=f"{etf}  (base {base*100:.0f}%)",
-        value=f"{p*100:.1f}%",
-        delta=f"{adj*100:+.1f}pp vs base",
-        delta_color="normal"
-    )
+# Split into two rows for 7 ETFs
+row1_etfs = TARGET_ETFS[:4]
+row2_etfs = TARGET_ETFS[4:]
+prob_row1 = st.columns(len(row1_etfs))
+prob_row2 = st.columns(len(row2_etfs))
+
+for row_etfs, row_cols in [(row1_etfs, prob_row1), (row2_etfs, prob_row2)]:
+    for col, etf in zip(row_cols, row_etfs):
+        i    = TARGET_ETFS.index(etf)
+        p    = float(last_p[i]) if i < len(last_p) else 0.5
+        base = base_rates.get(etf, 0.5)
+        adj  = p - base
+        col.metric(
+            label=f"{etf}  (base {base*100:.0f}%)",
+            value=f"{p*100:.1f}%",
+            delta=f"{adj*100:+.1f}pp vs base",
+            delta_color="normal"
+        )
 
 # ═════════════════════════════════════════════════════════════════════════════
 # PERFORMANCE METRICS
@@ -575,6 +582,7 @@ if audit_trail:
     priority = ["Date", "Signal", "Top_Pick", "Regime", "Conviction_Z",
                 "P_Top", "Signal_Ret%",
                 "TLT_Ret%", "TBT_Ret%", "VNQ_Ret%", "SLV_Ret%", "GLD_Ret%",
+                "LQD_Ret%", "HYG_Ret%",
                 "Stop_Active", "Rotated", "Disagree"]
     audit_df = audit_df[[c for c in priority if c in audit_df.columns]]
 
