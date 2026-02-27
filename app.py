@@ -655,7 +655,7 @@ Each model answers: <em>"Will this ETF beat the 3M T-Bill rate over the next
 
 <h4 style="color:#00d1b2;">⚡ Strategy Execution</h4>
 <ul>
-  <li><b>Conviction gate:</b> Z ≥ {z_min_entry:.1f}σ to enter — below this holds CASH
+  <li><b>Conviction gate:</b> Regime-aware Z threshold — Risk-On ≥ 1.0σ, Rate-Rising ≥ 0.5σ, Crisis/Risk-Off ≥ 0.3σ — below threshold holds CASH
       earning {rf_rate*100:.2f}% annualised</li>
   <li><b>Stop-loss:</b> 2-day cumulative loss ≤ {stop_loss_pct*100:.0f}% → CASH
       until Z ≥ {z_reentry:.1f}σ</li>
