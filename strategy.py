@@ -88,18 +88,22 @@ def execute_strategy(
     common_dates = predictions_df.index.intersection(daily_ret_df.index)
     pred_a       = predictions_df.loc[common_dates]
     ret_a        = daily_ret_df.loc[common_dates]
-    p_cols       = [f"{t}_P"  for t in TARGET_ETFS]
-    pa_cols      = [f"{t}_PA" for t in TARGET_ETFS]
+    p_cols       = [f"{t}_P"   for t in TARGET_ETFS]
+    rs_cols      = [f"{t}_RS"  for t in TARGET_ETFS]   # LambdaRank scores
+    pa_cols      = [f"{t}_PA"  for t in TARGET_ETFS]   # P_Adjusted fallback
     dis_cols     = [f"{t}_Disagree" for t in TARGET_ETFS]
 
     for i, trade_date in enumerate(common_dates):
         row      = pred_a.iloc[i]
         p_array  = np.array([float(row.get(c, 0.5)) for c in p_cols])
+        rs_array = np.array([float(row.get(c, 0.0)) for c in rs_cols])
         pa_array = np.array([float(row.get(c, p_array[j] - 0.5))
                               for j, c in enumerate(pa_cols)])
         dis_arr  = np.array([bool(row.get(c, False)) for c in dis_cols])
 
-        ranked     = np.argsort(pa_array)[::-1]
+        # Primary ranking: LambdaRank score if available, else P_Adjusted
+        rank_input = rs_array if rs_array.std() > 1e-6 else pa_array
+        ranked     = np.argsort(rank_input)[::-1]
         best_idx   = int(ranked[0])
         second_idx = int(ranked[1]) if len(ranked) > 1 else best_idx
         _, day_z, day_label = compute_conviction(p_array)
