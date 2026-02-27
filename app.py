@@ -564,8 +564,8 @@ if audit_trail:
     def style_signal(val):
         if val == "CASH":
             return "color: #888888"
-        colours = {"TLT":"#00bfff","TBT":"#ff6b6b","VNQ":"#ffd700",
-                   "SLV":"#c0c0c0","GLD":"#ffa500"}
+        colours = {"TLT":"#00bfff","VNQ":"#ffd700","SLV":"#c0c0c0",
+                   "GLD":"#ffa500","LQD":"#88ddff","HYG":"#ff9966"}
         return f"color: {colours.get(val, '#ffffff')}; font-weight: 600"
 
     def style_regime(val):
@@ -581,7 +581,7 @@ if audit_trail:
     # Reorder columns for readability — only include columns that exist
     priority = ["Date", "Signal", "Top_Pick", "Regime", "Conviction_Z",
                 "P_Top", "Signal_Ret%",
-                "TLT_Ret%", "TBT_Ret%", "VNQ_Ret%", "SLV_Ret%", "GLD_Ret%",
+                "TLT_Ret%", "VNQ_Ret%", "SLV_Ret%", "GLD_Ret%",
                 "LQD_Ret%", "HYG_Ret%",
                 "Stop_Active", "Rotated", "Disagree"]
     audit_df = audit_df[[c for c in priority if c in audit_df.columns]]
