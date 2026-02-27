@@ -156,35 +156,7 @@ if not run_btn:
     st.stop()
 
 # ── Load data ─────────────────────────────────────────────────────────────────
-# ── Session state for refresh message persistence ────────────────────────────
-if "refresh_msg" not in st.session_state:
-    st.session_state.refresh_msg = None
-if "refresh_ok" not in st.session_state:
-    st.session_state.refresh_ok = None
-
-if refresh_btn:
-    with st.spinner("🔄 Refreshing data from FRED + yfinance..."):
-        try:
-            st.cache_data.clear()
-            st.cache_resource.clear()
-            df_fresh = get_data(start_year=start_year, force_refresh=True)
-            st.session_state.refresh_ok  = True
-            st.session_state.refresh_msg = (
-                f"✅ Data refreshed — dataset current to "
-                f"**{df_fresh.index[-1].date()}** "
-                f"({len(df_fresh):,} rows × {df_fresh.shape[1]} cols)"
-            )
-        except Exception as e:
-            st.session_state.refresh_ok  = False
-            st.session_state.refresh_msg = f"❌ Refresh failed: {e}"
-
-# Show persistent refresh message
-if st.session_state.refresh_msg:
-    if st.session_state.refresh_ok:
-        st.success(st.session_state.refresh_msg)
-    else:
-        st.error(st.session_state.refresh_msg)
-
+# ── Data loading ─────────────────────────────────────────────────────────────
 with st.spinner("📥 Loading dataset from GitLab..."):
     try:
         df = cached_get_data(start_year)
@@ -193,6 +165,21 @@ with st.spinner("📥 Loading dataset from GitLab..."):
     except Exception as e:
         st.error(f"❌ Data load failed: {e}")
         st.stop()
+
+if refresh_btn:
+    with st.spinner("🔄 Fetching latest data from FRED + yfinance..."):
+        try:
+            from data_manager import get_data as _get_data
+            df_fresh = _get_data(start_year=start_year, force_refresh=True)
+            st.cache_data.clear()
+            st.cache_resource.clear()
+            st.success(
+                f"✅ Data refreshed — current to **{df_fresh.index[-1].date()}** "
+                f"({len(df_fresh):,} rows). Reloading..."
+            )
+            st.rerun()
+        except Exception as e:
+            st.error(f"❌ Refresh failed: {e}")
 
 # ── Load models from GitLab ───────────────────────────────────────────────────
 with st.spinner("🧠 Loading models from GitLab..."):
@@ -499,25 +486,10 @@ if "Regime_Name" in df.columns:
 # AUDIT TRAIL
 # ═════════════════════════════════════════════════════════════════════════════
 st.divider()
-st.subheader("📋 Audit Trail")
+st.subheader("📋 Audit Trail — Last 30 Trading Days")
 
 if audit_trail:
-    audit_full = pd.DataFrame(audit_trail)
-    total_days = len(audit_full)
-
-    # Controls row
-    col_a, col_b = st.columns([3, 1])
-    with col_a:
-        show_n = st.select_slider(
-            "Show last N trading days",
-            options=[30, 60, 90, 180, 365, total_days],
-            value=30,
-            format_func=lambda x: f"All {x} days" if x == total_days else f"Last {x} days"
-        )
-    with col_b:
-        st.metric("Total Days", f"{total_days:,}")
-
-    audit_df = audit_full.tail(show_n)
+    audit_df = pd.DataFrame(audit_trail).tail(30)
 
     # Colour-code Signal column
     def style_signal(val):
