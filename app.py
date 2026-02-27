@@ -59,8 +59,8 @@ except Exception as e:
 def cached_get_data(start_year, force=False):
     return get_data(start_year=start_year, force_refresh=force)
 
-@st.cache_data(ttl=3600, show_spinner=False)
 def cached_load_predictions():
+    # Not cached — must filter by start_year, caching would return stale full history
     return load_predictions_from_gitlab()
 
 @st.cache_resource(ttl=3600, show_spinner=False)
@@ -305,8 +305,6 @@ with st.spinner("📡 Loading predictions from GitLab..."):
             if pred_history is None:
                 st.warning("⚠️ Momentum predictions not found — generating now...")
                 pred_history = momentum_ranker.predict_all_history(df)
-            else:
-                st.success(f"✅ Momentum predictions loaded: {len(pred_history):,} rows")
         else:
             pred_history = cached_load_predictions()
             if pred_history is None:
@@ -316,9 +314,12 @@ with st.spinner("📡 Loading predictions from GitLab..."):
                                           .fillna(feat_df[feature_cols].median())
                                           .fillna(0.0))
                 pred_history = bank.predict_all_history(feat_df)
-            else:
-                st.success(f"✅ ML predictions loaded: {len(pred_history):,} rows "
-                           f"(current to {pred_history.index[-1].date()})")
+
+        # Ensure DatetimeIndex and confirm load
+        if pred_history is not None:
+            pred_history.index = pd.to_datetime(pred_history.index)
+            st.success(f"✅ Predictions loaded: {len(pred_history):,} rows "
+                       f"({pred_history.index[0].date()} → {pred_history.index[-1].date()})")
     except Exception as e:
         st.error(f"❌ Prediction load failed: {e}")
         st.stop()
