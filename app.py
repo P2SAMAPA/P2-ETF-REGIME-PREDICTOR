@@ -107,11 +107,6 @@ with st.sidebar:
     st.divider()
 
     st.subheader("🛡️ Risk Controls")
-    z_min_entry = st.slider(
-        "Min Entry Conviction (Z)", min_value=0.0, max_value=2.0,
-        value=0.5, step=0.1,
-        help="Minimum Z-score to enter a position — below this holds CASH"
-    )
     z_reentry = st.slider(
         "Re-entry after Stop (Z)", min_value=0.5, max_value=3.0,
         value=1.0, step=0.1,
@@ -144,29 +139,6 @@ st.caption(
     "5 binary classifiers (TLT · TBT · VNQ · SLV · GLD)"
 )
 
-if not run_btn:
-    # Landing state
-    col1, col2, col3 = st.columns(3)
-    with col1:
-        st.info("**Step 1** — Configure risk controls in the sidebar")
-    with col2:
-        st.info("**Step 2** — Click **Run Model** to load and display results")
-    with col3:
-        st.info("**Step 3** — Review signal, regime, and audit trail")
-    st.stop()
-
-# ── Load data ─────────────────────────────────────────────────────────────────
-# ── Data loading ─────────────────────────────────────────────────────────────
-with st.spinner("📥 Loading dataset from GitLab..."):
-    try:
-        df = cached_get_data(start_year)
-        st.success(f"✅ Dataset: {len(df):,} rows × {df.shape[1]} cols "
-                   f"({df.index[0].date()} → {df.index[-1].date()})")
-    except Exception as e:
-        st.error(f"❌ Data load failed: {e}")
-        st.stop()
-
-# ── Refresh button handler ───────────────────────────────────────────────────
 if "refresh_status" not in st.session_state:
     st.session_state.refresh_status = None
 
@@ -191,6 +163,31 @@ if st.session_state.refresh_status:
         st.success(msg)
     else:
         st.error(msg)
+
+if not run_btn:
+    # Landing state
+    col1, col2, col3 = st.columns(3)
+    with col1:
+        st.info("**Step 1** — Configure risk controls in the sidebar")
+    with col2:
+        st.info("**Step 2** — Click **Run Model** to load and display results")
+    with col3:
+        st.info("**Step 3** — Review signal, regime, and audit trail")
+    st.stop()
+
+
+# ── Load data ─────────────────────────────────────────────────────────────────
+# ── Data loading ─────────────────────────────────────────────────────────────
+with st.spinner("📥 Loading dataset from GitLab..."):
+    try:
+        df = cached_get_data(start_year)
+        st.success(f"✅ Dataset: {len(df):,} rows × {df.shape[1]} cols "
+                   f"({df.index[0].date()} → {df.index[-1].date()})")
+    except Exception as e:
+        st.error(f"❌ Data load failed: {e}")
+        st.stop()
+
+# ── Refresh button handler ───────────────────────────────────────────────────
 
 # ── Load models from GitLab ───────────────────────────────────────────────────
 with st.spinner("🧠 Loading models from GitLab..."):
@@ -284,7 +281,6 @@ with st.spinner("📊 Running backtest..."):
             predictions_df = pred_history,
             daily_ret_df   = daily_rets,
             rf_rate        = rf_rate,
-            z_min_entry    = z_min_entry,
             z_reentry      = z_reentry,
             stop_loss_pct  = stop_loss_pct,
             fee_bps        = fee_bps,
