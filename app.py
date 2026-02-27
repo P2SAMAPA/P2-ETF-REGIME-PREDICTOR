@@ -331,15 +331,21 @@ with st.spinner("📊 Running backtest..."):
     regime_ser = df["Regime_Name"] if "Regime_Name" in df.columns else None
 
     try:
+        # Filter to start_year for backtest — pred_history covers full history
+        cutoff = pd.Timestamp(f"{start_year}-01-01")
+        pred_bt = pred_history[pred_history.index >= cutoff]
+        rets_bt = daily_rets[daily_rets.index >= cutoff]
+        reg_bt  = regime_ser[regime_ser.index >= cutoff]                   if regime_ser is not None else None
+
         (strat_rets, audit_trail, next_date, next_signal,
          conviction_z, conviction_label, last_p) = execute_strategy(
-            predictions_df = pred_history,
-            daily_ret_df   = daily_rets,
+            predictions_df = pred_bt,
+            daily_ret_df   = rets_bt,
             rf_rate        = rf_rate,
             z_reentry      = z_reentry,
             stop_loss_pct  = stop_loss_pct,
             fee_bps        = fee_bps,
-            regime_series  = regime_ser,
+            regime_series  = reg_bt,
         )
         metrics = calculate_metrics(strat_rets, rf_rate=rf_rate)
     except Exception as e:
@@ -459,7 +465,7 @@ c10.metric("📅 Test Days",
 st.divider()
 st.subheader("📈 Equity Curve")
 
-plot_dates = pred_history.index[:len(metrics.get("cum_returns", []))]
+plot_dates = pred_bt.index[:len(metrics.get("cum_returns", []))]
 cum_rets   = metrics.get("cum_returns", np.array([]))
 
 fig = go.Figure()
