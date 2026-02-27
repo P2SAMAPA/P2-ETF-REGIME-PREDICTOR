@@ -156,7 +156,7 @@ mode_label = ("Option B — Momentum (RoC + Volume + Breakout)"
                "Option A — ML Ensemble (XGBoost + Ridge + LambdaRank voting)")
 st.caption(
     f"Wasserstein k-means regime detection • {mode_label} • "
-    "ETFs: TLT · TBT · VNQ · SLV · GLD"
+    "ETFs: TLT · VNQ · SLV · GLD . LQD . HYG"
 )
 
 if "refresh_status" not in st.session_state:
