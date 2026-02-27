@@ -48,7 +48,7 @@ FRED_API_KEY     = os.getenv("FRED_API_KEY", "")
 # GitLab project ID — URL-encoded namespace/project
 GITLAB_PROJECT   = "P2SAMAPA%2Fp2-etf-regime-predictor"
 
-TARGET_ETFS      = ["TLT", "TBT", "VNQ", "SLV", "GLD"]
+TARGET_ETFS      = ["TLT", "TBT", "VNQ", "SLV", "GLD", "LQD", "HYG"]
 BENCHMARK_ETFS   = ["SPY", "AGG"]
 ALL_TICKERS      = TARGET_ETFS + BENCHMARK_ETFS
 
@@ -397,6 +397,26 @@ def compute_macro_features(df: pd.DataFrame) -> pd.DataFrame:
 
     # Combine
     combined = pd.concat([df, pd.DataFrame(new_cols, index=df.index)], axis=1)
+
+    # Credit spread features — LQD/HYG relative to TLT (regime signals)
+    if "LQD_Ret" in new_cols and "HYG_Ret" in new_cols:
+        # HY-IG spread proxy: HYG return minus LQD return
+        new_cols["HYG_vs_LQD_5d"]  = (new_cols["HYG_Ret"].rolling(5).mean() -
+                                       new_cols["LQD_Ret"].rolling(5).mean())
+        new_cols["HYG_vs_LQD_21d"] = (new_cols["HYG_Ret"].rolling(21).mean() -
+                                       new_cols["LQD_Ret"].rolling(21).mean())
+    if "LQD_Ret" in new_cols and "TLT_Ret" in new_cols:
+        # IG spread vs rates: LQD minus TLT (credit risk premium signal)
+        new_cols["LQD_vs_TLT_5d"]  = (new_cols["LQD_Ret"].rolling(5).mean() -
+                                       new_cols["TLT_Ret"].rolling(5).mean())
+        new_cols["LQD_vs_TLT_21d"] = (new_cols["LQD_Ret"].rolling(21).mean() -
+                                       new_cols["TLT_Ret"].rolling(21).mean())
+    if "HYG_Ret" in new_cols and "TLT_Ret" in new_cols:
+        # HY spread vs rates: risk-on/off signal
+        new_cols["HYG_vs_TLT_5d"]  = (new_cols["HYG_Ret"].rolling(5).mean() -
+                                       new_cols["TLT_Ret"].rolling(5).mean())
+        new_cols["HYG_vs_TLT_21d"] = (new_cols["HYG_Ret"].rolling(21).mean() -
+                                       new_cols["TLT_Ret"].rolling(21).mean())
 
     # USD daily change — key leading indicator for SLV/GLD moves
     if "DTWEXBGS" in df.columns:
