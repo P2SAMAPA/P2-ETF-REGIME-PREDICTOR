@@ -48,7 +48,7 @@ FRED_API_KEY     = os.getenv("FRED_API_KEY", "")
 # GitLab project ID — URL-encoded namespace/project
 GITLAB_PROJECT   = "P2SAMAPA%2Fp2-etf-regime-predictor"
 
-TARGET_ETFS      = ["TLT", "TBT", "VNQ", "SLV", "GLD", "LQD", "HYG"]
+TARGET_ETFS      = ["TLT", "VNQ", "SLV", "GLD", "LQD", "HYG"]
 BENCHMARK_ETFS   = ["SPY", "AGG"]
 ALL_TICKERS      = TARGET_ETFS + BENCHMARK_ETFS
 
@@ -427,9 +427,9 @@ def compute_macro_features(df: pd.DataFrame) -> pd.DataFrame:
     # Cross-ETF relative momentum features
     # Gives LambdaRank direct signals about which ETF is currently winning
     etf_pairs = [
-        ("SLV", "VNQ"), ("SLV", "TBT"), ("SLV", "TLT"),
-        ("GLD", "TBT"), ("GLD", "VNQ"), ("TBT", "TLT"),
-        ("TBT", "VNQ"),
+        ("SLV", "VNQ"), ("SLV", "TLT"), ("SLV", "LQD"), ("SLV", "HYG"),
+        ("GLD", "VNQ"), ("GLD", "LQD"), ("GLD", "HYG"),
+        ("LQD", "HYG"), ("LQD", "TLT"), ("HYG", "TLT"),
     ]
     for e1, e2 in etf_pairs:
         r1_5  = new_cols.get(f"{e1}_Ret", pd.Series(dtype=float)).rolling(5).mean()
