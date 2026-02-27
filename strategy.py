@@ -131,7 +131,10 @@ def execute_strategy(
         active_idx      = rotated_idx if rotated_idx is not None else best_idx
         etf_name        = TARGET_ETFS[active_idx]
         active_disagree = bool(dis_arr[active_idx])
-        effective_z     = day_z * 0.5 if active_disagree else day_z
+        # Hard block 1: Disagree=True alone → CASH (data shows 25% win rate)
+        # Hard block 2: Rotated=True + Disagree=True → CASH (catastrophic combo)
+        hard_block  = active_disagree
+        effective_z = day_z if not active_disagree else 0.0  # zero kills entry
 
         act_ret_col = f"{etf_name}_Ret"
         realized    = float(ret_a.iloc[i].get(act_ret_col, 0.0))
