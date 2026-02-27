@@ -522,38 +522,29 @@ if audit_trail:
         except Exception:
             return ""
 
-    # Build format dict dynamically based on available columns
-    fmt = {"Conviction_Z": "{:+.2f}", "P_Top": "{:.3f}"}
-    ret_display_cols = []
-    for col in audit_df.columns:
-        if col.endswith("_Ret%") or col == "Signal_Ret%":
-            fmt[col] = "{:+.3f}%"
-            ret_display_cols.append(col)
-
-    # Reorder columns for readability
+    # Reorder columns for readability — only include columns that exist
     priority = ["Date", "Signal", "Top_Pick", "Regime", "Conviction_Z",
-                "P_Top", "Signal_Ret%"] + ret_display_cols +                ["Stop_Active", "Rotated", "Disagree"]
-    ordered_cols = [c for c in priority if c in audit_df.columns]
-    audit_df = audit_df[ordered_cols]
+                "P_Top", "Signal_Ret%",
+                "TLT_Ret%", "TBT_Ret%", "VNQ_Ret%", "SLV_Ret%", "GLD_Ret%",
+                "Stop_Active", "Rotated", "Disagree"]
+    audit_df = audit_df[[c for c in priority if c in audit_df.columns]]
 
-    # Style
-    style_cols = {}
-    if "Signal" in audit_df.columns:
-        style_cols["Signal"] = style_signal
-    if "Top_Pick" in audit_df.columns:
-        style_cols["Top_Pick"] = style_signal
-    if "Regime" in audit_df.columns:
-        style_cols["Regime"] = style_regime
-    if "Signal_Ret%" in audit_df.columns:
-        style_cols["Signal_Ret%"] = style_return
+    # Format numbers
+    fmt = {}
+    for col in audit_df.columns:
+        if col == "Conviction_Z":
+            fmt[col] = "{:+.2f}"
+        elif col == "P_Top":
+            fmt[col] = "{:.3f}"
+        elif col.endswith("_Ret%") or col == "Signal_Ret%":
+            fmt[col] = "{:+.3f}%"
 
-    styled = audit_df.style
-    for col, fn in style_cols.items():
-        styled = styled.applymap(fn, subset=[col])
-    for col in ret_display_cols:
-        styled = styled.applymap(style_return, subset=[col])
-    styled = styled.format(fmt)
-    st.dataframe(styled, use_container_width=True, height=500)
+    # Safe display without complex styling that can KeyError
+    st.dataframe(
+        audit_df.style.format(fmt, na_rep="—"),
+        use_container_width=True,
+        height=500
+    )
 else:
     st.info("No audit trail available yet.")
 
