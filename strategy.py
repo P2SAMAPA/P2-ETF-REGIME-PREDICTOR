@@ -29,6 +29,19 @@ log = logging.getLogger(__name__)
 TARGET_ETFS = ["TLT", "TBT", "VNQ", "SLV", "GLD"]
 
 
+# Regime-aware minimum conviction thresholds
+REGIME_Z_MIN = {
+    "Risk-On":           1.0,
+    "Risk-On-Commodity": 0.5,
+    "Rate-Rising":       0.5,
+    "Rate-Falling":      0.5,
+    "Risk-Off":          0.3,
+    "Crisis":            0.3,
+    "Stagflation":       0.5,
+    "Global":            0.7,
+}
+DEFAULT_Z_MIN = 0.7
+
 def compute_conviction(p_beat_cash: np.ndarray) -> Tuple[int, float, str]:
     """Conviction Z-score from P(beat cash) array. Returns (best_idx, z, label)."""
     mean = np.mean(p_beat_cash)
@@ -57,7 +70,6 @@ def execute_strategy(
     predictions_df:  pd.DataFrame,
     daily_ret_df:    pd.DataFrame,
     rf_rate:         float = 0.045,
-    z_min_entry:     float = 0.5,
     z_reentry:       float = 1.0,
     stop_loss_pct:   float = -0.12,
     fee_bps:         int   = 5,
@@ -117,6 +129,23 @@ def execute_strategy(
         best_idx   = int(ranked[0])
         second_idx = int(ranked[1]) if len(ranked) > 1 else best_idx
         _, day_z, day_label = compute_conviction(p_array)
+
+        # ── Regime name for this day ──────────────────────────────────────
+        current_regime_name = ""
+        if regime_series is not None and trade_date in regime_series.index:
+            current_regime_name = str(regime_series.loc[trade_date])
+
+        # ── Commodity sub-regime within Risk-On ───────────────────────────
+        # If SLV or GLD has strong positive adjusted score, treat as
+        # commodity-breakout environment (lower Z bar, different signals)
+        if current_regime_name == "Risk-On":
+            slv_pa = float(row.get("SLV_PA", 0.0))
+            gld_pa = float(row.get("GLD_PA", 0.0))
+            if slv_pa > 0.05 or gld_pa > 0.05:
+                current_regime_name = "Risk-On-Commodity"
+
+        # ── Regime-aware conviction threshold ─────────────────────────────
+        z_min_entry = REGIME_Z_MIN.get(current_regime_name, DEFAULT_Z_MIN)
 
         top_ret_col = f"{TARGET_ETFS[best_idx]}_Ret"
         top_actual  = float(ret_a.iloc[i].get(top_ret_col, 0.0))
