@@ -156,7 +156,7 @@ mode_label = ("Option B — Momentum (RoC + Volume + Breakout)"
                "Option A — ML Ensemble (XGBoost + Ridge + LambdaRank voting)")
 st.caption(
     f"Wasserstein k-means regime detection • {mode_label} • "
-    "ETFs: TLT · LQD . HYG · VNQ · SLV · GLD"
+    "ETFs: TLT · VNQ · SLV · GLD · LQD · HYG"
 )
 
 if "refresh_status" not in st.session_state:
@@ -333,9 +333,19 @@ with st.spinner("📊 Running backtest..."):
     try:
         # Filter to start_year for backtest — pred_history covers full history
         cutoff = pd.Timestamp(f"{start_year}-01-01")
+
+        # Ensure index is DatetimeIndex for filtering
+        if not isinstance(pred_history.index, pd.DatetimeIndex):
+            pred_history.index = pd.to_datetime(pred_history.index)
+        if not isinstance(daily_rets.index, pd.DatetimeIndex):
+            daily_rets.index = pd.to_datetime(daily_rets.index)
+
         pred_bt = pred_history[pred_history.index >= cutoff]
         rets_bt = daily_rets[daily_rets.index >= cutoff]
         reg_bt  = regime_ser[regime_ser.index >= cutoff]                   if regime_ser is not None else None
+
+        st.caption(f"Backtest period: {pred_bt.index[0].date()} → "
+                   f"{pred_bt.index[-1].date()} ({len(pred_bt):,} days)")
 
         (strat_rets, audit_trail, next_date, next_signal,
          conviction_z, conviction_label, last_p) = execute_strategy(
@@ -431,7 +441,7 @@ c1.metric("📈 Ann. Return",
 c2.metric("📊 Sharpe",
           f"{metrics.get('sharpe',0):.2f}",
           delta="Above 1.0 ✓" if metrics.get("sharpe",0) > 1 else "Below 1.0")
-c3.metric("🎯 Hit Ratio 15d",
+c3.metric("🎯 Hit Ratio (Full)",
           f"{metrics.get('hit_ratio',0)*100:.0f}%",
           delta="Strong" if metrics.get("hit_ratio",0) > 0.6 else "Weak")
 c4.metric("📉 Max Drawdown",
