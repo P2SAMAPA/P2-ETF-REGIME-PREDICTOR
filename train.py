@@ -35,6 +35,7 @@ log = logging.getLogger(__name__)
 
 # ── Imports ───────────────────────────────────────────────────────────────────
 from data_manager import (
+    save_predictions_to_gitlab,
     get_data, build_full_dataset, incremental_update,
     build_forward_targets, load_dataset_from_gitlab,
     save_dataset_to_gitlab, save_model_to_gitlab,
@@ -242,6 +243,10 @@ def run_pipeline(force_refresh: bool = False,
     # ── Step 8: Save to GitLab ─────────────────────────────────────────────────
     if not skip_gitlab_write:
         log.info("Step 8: Saving to GitLab...")
+
+        # Prediction history (saves heavy compute from Streamlit)
+        ok = save_predictions_to_gitlab(pred_history)
+        log.info(f"  Prediction history saved: {ok}")
 
         # Dataset
         ok = save_dataset_to_gitlab(df)
