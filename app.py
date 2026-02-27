@@ -192,9 +192,9 @@ with st.spinner("🧠 Loading models from GitLab..."):
         st.warning("⚠️ Regime detector not found — run pipeline first")
 
     if bank:
+        n_regime = len(getattr(bank, "models_", {}))
         st.success(f"✅ Model bank loaded "
-                   f"({len(bank.classifiers_)} regime classifiers + "
-                   f"{len(bank.global_classifiers_)} global fallbacks)")
+                   f"({n_regime} regime ranking models + 1 global fallback)")
     else:
         st.warning("⚠️ Model bank not found — run pipeline first")
 
