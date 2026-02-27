@@ -29,7 +29,6 @@ try:
     HAS_XGB = True
 except ImportError:
     HAS_XGB = False
-    log.warning("xgboost not installed — Layer 2A will use LambdaRank + Ridge only")
 from sklearn.linear_model import LogisticRegression, Ridge
 from sklearn.preprocessing import RobustScaler
 from sklearn.metrics import roc_auc_score
