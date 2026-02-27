@@ -300,6 +300,30 @@ def compute_etf_features(df: pd.DataFrame) -> pd.DataFrame:
                     spy_ret.rolling(21).mean()
                 )
 
+    # Rate-of-Change momentum features (for Layer 2B momentum ranker)
+    # Raw RoC — no volatility scaling per user preference
+    for ticker in TARGET_ETFS:
+        ret_key = f"{ticker}_Ret"
+        if ret_key not in new_cols:
+            continue
+        price_proxy = (1 + new_cols[ret_key]).cumprod()
+        # Rate of change: today vs N days ago
+        for n in [5, 10, 21, 63]:
+            new_cols[f"{ticker}_RoC{n}d"] = price_proxy.pct_change(n)
+        # Volume accumulation: OBV-like — sum of signed volume
+        vol_key = f"{ticker}_Volume"
+        if vol_key in df.columns:
+            signed_vol = df[vol_key] * np.sign(new_cols[ret_key].fillna(0))
+            new_cols[f"{ticker}_OBV10d"] = signed_vol.rolling(10).sum()
+            new_cols[f"{ticker}_OBV21d"] = signed_vol.rolling(21).sum()
+        # Breakout: price vs 20d high (1 = at high, 0 = at low)
+        rolling_high = price_proxy.rolling(20).max()
+        rolling_low  = price_proxy.rolling(20).min()
+        rng = rolling_high - rolling_low
+        new_cols[f"{ticker}_Breakout20d"] = (
+            (price_proxy - rolling_low) / (rng + 1e-9)
+        )
+
     # Breakout features — 1d and 3d return vs 21d realised vol
     # Critical for catching explosive precious metals / commodity moves
     for ticker in TARGET_ETFS:
@@ -564,15 +588,16 @@ def load_model_from_gitlab(filename: str) -> Optional[bytes]:
     return gitlab_read_binary(f"models/{filename}")
 
 
-def save_predictions_to_gitlab(pred_df: pd.DataFrame) -> bool:
+def save_predictions_to_gitlab(pred_df: pd.DataFrame,
+                                path: str = "data/pred_history.csv") -> bool:
     return gitlab_write_file(
-        "data/pred_history.csv", pred_df.to_csv(),
+        path, pred_df.to_csv(),
         f"Update predictions {pred_df.index[-1].date()} ({len(pred_df)} rows)"
     )
 
 
-def load_predictions_from_gitlab() -> Optional[pd.DataFrame]:
-    content = gitlab_read_file("data/pred_history.csv")
+def load_predictions_from_gitlab(path: str = "data/pred_history.csv") -> Optional[pd.DataFrame]:
+    content = gitlab_read_file(path)
     if content is None:
         return None
     try:
@@ -590,6 +615,14 @@ def save_feature_list_to_gitlab(feature_names: list) -> bool:
                           "updated":   datetime.utcnow().isoformat()})
     return gitlab_write_file("meta/feature_list.json", content,
                               "Update feature list")
+
+
+def load_momentum_ranker_from_gitlab() -> Optional[bytes]:
+    return load_model_from_gitlab("momentum_ranker.pkl")
+
+
+def load_momentum_predictions_from_gitlab() -> Optional[pd.DataFrame]:
+    return load_predictions_from_gitlab("data/mom_pred_history.csv")
 
 
 def load_feature_list_from_gitlab() -> Optional[list]:
