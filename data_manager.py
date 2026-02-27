@@ -1,5 +1,5 @@
 """
-data_manager.py — P3-ETF-REGIME-PREDICTOR
+data_manager.py — P2-ETF-REGIME-PREDICTOR
 ==========================================
 Handles all data fetching, feature engineering, and GitLab storage.
 
@@ -7,8 +7,7 @@ Data sources:
   - FRED API: macro signals (DGS10, T10Y2Y, T10Y3M, DTB3, MORTGAGE30US,
                VIXCLS, DTWEXBGS, DCOILWTICO, BAMLC0A0CM, BAMLH0A0HYM2,
                UMCSENT, T10YIE)
-  - yfinance (fallback: Stooq): ETF OHLCV for TLT, TBT, VNQ, SLV, GLD,
-               SPY, AGG
+  - yfinance: ETF OHLCV for TLT, VNQ, SLV, GLD, LQD, HYG, SPY, AGG
 
 GitLab storage:
   - data/etf_data.csv         — full feature dataset
