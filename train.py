@@ -154,10 +154,9 @@ def run_pipeline(force_refresh: bool = False,
         bank.fit(df_train, fwd_train,
                  feature_cols=feature_cols,
                  val_pct=VAL_PCT)
-        results["n_classifiers"] = len(bank.classifiers_)
-        results["val_metrics"]   = bank.val_metrics_
-        log.info(f"Trained {len(bank.classifiers_)} regime-specific classifiers "
-                 f"+ {len(bank.global_classifiers_)} global fallbacks")
+        results["n_models"]  = len(bank.models_)
+        log.info(f"Trained {len(bank.models_)} regime-specific ranking models "
+                 f"+ 1 global fallback")
     except Exception as e:
         log.error(f"Model training failed: {e}")
         raise
