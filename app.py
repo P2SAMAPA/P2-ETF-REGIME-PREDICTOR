@@ -143,19 +143,35 @@ if "refresh_status" not in st.session_state:
     st.session_state.refresh_status = None
 
 if refresh_btn:
-    with st.spinner("🔄 Fetching latest data from FRED + yfinance..."):
+    with st.spinner("🔄 Triggering pipeline via GitHub Actions..."):
         try:
-            from data_manager import get_data as _get_data
-            df_fresh = _get_data(start_year=start_year, force_refresh=True)
-            st.cache_data.clear()
-            st.cache_resource.clear()
-            st.session_state.refresh_status = (
-                "ok",
-                f"✅ Data refreshed — current to **{df_fresh.index[-1].date()}** "
-                f"({len(df_fresh):,} rows × {df_fresh.shape[1]} cols)"
+            import requests, os
+            gh_token = os.environ.get("GITHUB_PAT", "")
+            gh_repo  = os.environ.get("GITHUB_REPO",
+                        "P2SAMAPA/P2-ETF-REGIME-PREDICTOR")
+            if not gh_token:
+                raise ValueError("GITHUB_PAT secret not set in Streamlit")
+            resp = requests.post(
+                f"https://api.github.com/repos/{gh_repo}/actions/workflows/daily_pipeline.yml/dispatches",
+                headers={
+                    "Authorization": f"Bearer {gh_token}",
+                    "Accept": "application/vnd.github+json",
+                },
+                json={"ref": "main"},
+                timeout=15,
             )
+            if resp.status_code == 204:
+                st.cache_data.clear()
+                st.cache_resource.clear()
+                st.session_state.refresh_status = (
+                    "ok",
+                    "✅ Pipeline triggered — GitHub Actions is fetching fresh data. "
+                    "Check back in ~5 minutes then click **Run Model** to see updated results."
+                )
+            else:
+                raise ValueError(f"GitHub API returned {resp.status_code}: {resp.text}")
         except Exception as e:
-            st.session_state.refresh_status = ("err", f"❌ Refresh failed: {e}")
+            st.session_state.refresh_status = ("err", f"❌ Trigger failed: {e}")
 
 if st.session_state.refresh_status:
     status, msg = st.session_state.refresh_status
