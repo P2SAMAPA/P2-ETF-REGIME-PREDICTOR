@@ -345,14 +345,8 @@ with st.spinner("📊 Running backtest..."):
         rets_bt = daily_rets[daily_rets.index >= cutoff]
         reg_bt  = regime_ser[regime_ser.index >= cutoff]                   if regime_ser is not None else None
 
-        st.info(
-            f"DEBUG — start_year={start_year} | cutoff={cutoff.date()} | "
-            f"pred_history rows={len(pred_history)} | "
-            f"pred_history index type={type(pred_history.index).__name__} | "
-            f"pred_history first={pred_history.index[0]} | "
-            f"pred_bt rows={len(pred_bt)} | "
-            f"pred_bt first={pred_bt.index[0].date() if len(pred_bt)>0 else 'EMPTY'}"
-        )
+        st.caption(f"Backtest period: {pred_bt.index[0].date()} → "
+                   f"{pred_bt.index[-1].date()} ({len(pred_bt):,} days)")
 
         (strat_rets, audit_trail, next_date, next_signal,
          conviction_z, conviction_label, last_p) = execute_strategy(
