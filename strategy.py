@@ -29,18 +29,8 @@ log = logging.getLogger(__name__)
 TARGET_ETFS = ["TLT", "TBT", "VNQ", "SLV", "GLD"]
 
 
-# Regime-aware minimum conviction thresholds
-REGIME_Z_MIN = {
-    "Risk-On":           1.0,
-    "Risk-On-Commodity": 0.5,
-    "Rate-Rising":       0.5,
-    "Rate-Falling":      0.5,
-    "Risk-Off":          0.3,
-    "Crisis":            0.3,
-    "Stagflation":       0.5,
-    "Global":            0.7,
-}
-DEFAULT_Z_MIN = 0.7
+# Fixed Z threshold — 1.0 sigma across all regimes
+DEFAULT_Z_MIN = 1.0
 
 def compute_conviction(p_beat_cash: np.ndarray) -> Tuple[int, float, str]:
     """Conviction Z-score from P(beat cash) array. Returns (best_idx, z, label)."""
@@ -144,8 +134,7 @@ def execute_strategy(
             if slv_pa > 0.05 or gld_pa > 0.05:
                 current_regime_name = "Risk-On-Commodity"
 
-        # ── Regime-aware conviction threshold ─────────────────────────────
-        z_min_entry = REGIME_Z_MIN.get(current_regime_name, DEFAULT_Z_MIN)
+        z_min_entry = DEFAULT_Z_MIN
 
         top_ret_col = f"{TARGET_ETFS[best_idx]}_Ret"
         top_actual  = float(ret_a.iloc[i].get(top_ret_col, 0.0))
