@@ -21,3 +21,4 @@ plotly>=5.20.0
 # Utilities
 pytz>=2024.1
 python-dotenv>=1.0.0
+xgboost
