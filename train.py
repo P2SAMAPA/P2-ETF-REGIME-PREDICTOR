@@ -197,7 +197,7 @@ def run_pipeline(force_refresh: bool = False,
             predictions_df = pred_history,
             daily_ret_df   = daily_rets,
             rf_rate        = rf_rate,
-            regime_series  = regime_series,
+            regime_series  = df["Regime_Name"] if "Regime_Name" in df.columns else None,
         )
 
         metrics = calculate_metrics(strat_rets, rf_rate=rf_rate)
