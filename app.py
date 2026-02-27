@@ -156,16 +156,34 @@ if not run_btn:
     st.stop()
 
 # ── Load data ─────────────────────────────────────────────────────────────────
+# ── Session state for refresh message persistence ────────────────────────────
+if "refresh_msg" not in st.session_state:
+    st.session_state.refresh_msg = None
+if "refresh_ok" not in st.session_state:
+    st.session_state.refresh_ok = None
+
 if refresh_btn:
     with st.spinner("🔄 Refreshing data from FRED + yfinance..."):
         try:
             st.cache_data.clear()
             st.cache_resource.clear()
             df_fresh = get_data(start_year=start_year, force_refresh=True)
-            st.success(f"✅ Data refreshed — dataset current to **{df_fresh.index[-1].date()}** "
-                       f"({len(df_fresh):,} rows × {df_fresh.shape[1]} cols)")
+            st.session_state.refresh_ok  = True
+            st.session_state.refresh_msg = (
+                f"✅ Data refreshed — dataset current to "
+                f"**{df_fresh.index[-1].date()}** "
+                f"({len(df_fresh):,} rows × {df_fresh.shape[1]} cols)"
+            )
         except Exception as e:
-            st.error(f"❌ Refresh failed: {e}")
+            st.session_state.refresh_ok  = False
+            st.session_state.refresh_msg = f"❌ Refresh failed: {e}"
+
+# Show persistent refresh message
+if st.session_state.refresh_msg:
+    if st.session_state.refresh_ok:
+        st.success(st.session_state.refresh_msg)
+    else:
+        st.error(st.session_state.refresh_msg)
 
 with st.spinner("📥 Loading dataset from GitLab..."):
     try:
@@ -504,14 +522,37 @@ if audit_trail:
         except Exception:
             return ""
 
-    styled = (audit_df.style
-              .applymap(style_signal,   subset=["Signal"])
-              .applymap(style_signal,   subset=["Top_Pick"])
-              .applymap(style_regime,   subset=["Regime"])
-              .applymap(style_return,   subset=["Net_Return%"])
-              .format({"Conviction_Z": "{:+.2f}",
-                       "P_Top":        "{:.3f}",
-                       "Net_Return%":  "{:+.3f}%"}))
+    # Build format dict dynamically based on available columns
+    fmt = {"Conviction_Z": "{:+.2f}", "P_Top": "{:.3f}"}
+    ret_display_cols = []
+    for col in audit_df.columns:
+        if col.endswith("_Ret%") or col == "Signal_Ret%":
+            fmt[col] = "{:+.3f}%"
+            ret_display_cols.append(col)
+
+    # Reorder columns for readability
+    priority = ["Date", "Signal", "Top_Pick", "Regime", "Conviction_Z",
+                "P_Top", "Signal_Ret%"] + ret_display_cols +                ["Stop_Active", "Rotated", "Disagree"]
+    ordered_cols = [c for c in priority if c in audit_df.columns]
+    audit_df = audit_df[ordered_cols]
+
+    # Style
+    style_cols = {}
+    if "Signal" in audit_df.columns:
+        style_cols["Signal"] = style_signal
+    if "Top_Pick" in audit_df.columns:
+        style_cols["Top_Pick"] = style_signal
+    if "Regime" in audit_df.columns:
+        style_cols["Regime"] = style_regime
+    if "Signal_Ret%" in audit_df.columns:
+        style_cols["Signal_Ret%"] = style_return
+
+    styled = audit_df.style
+    for col, fn in style_cols.items():
+        styled = styled.applymap(fn, subset=[col])
+    for col in ret_display_cols:
+        styled = styled.applymap(style_return, subset=[col])
+    styled = styled.format(fmt)
     st.dataframe(styled, use_container_width=True, height=500)
 else:
     st.info("No audit trail available yet.")
