@@ -157,18 +157,23 @@ if not run_btn:
 
 # ── Load data ─────────────────────────────────────────────────────────────────
 if refresh_btn:
-    st.cache_data.clear()
-    st.cache_resource.clear()
+    with st.spinner("🔄 Refreshing data from FRED + yfinance..."):
+        try:
+            st.cache_data.clear()
+            st.cache_resource.clear()
+            df_fresh = get_data(start_year=start_year, force_refresh=True)
+            st.success(f"✅ Data refreshed — dataset current to **{df_fresh.index[-1].date()}** "
+                       f"({len(df_fresh):,} rows × {df_fresh.shape[1]} cols)")
+        except Exception as e:
+            st.error(f"❌ Refresh failed: {e}")
 
 with st.spinner("📥 Loading dataset from GitLab..."):
     try:
-        df = cached_get_data(start_year, force=refresh_btn)
+        df = cached_get_data(start_year)
         st.success(f"✅ Dataset: {len(df):,} rows × {df.shape[1]} cols "
                    f"({df.index[0].date()} → {df.index[-1].date()})")
-        if refresh_btn:
-            st.info(f"🔄 Data refreshed — current to **{df.index[-1].date()}**")
     except Exception as e:
-        st.error(f"❌ Data load failed — using cached data if available: {e}")
+        st.error(f"❌ Data load failed: {e}")
         st.stop()
 
 # ── Load models from GitLab ───────────────────────────────────────────────────
@@ -317,13 +322,18 @@ st.markdown(f"""
 # ── ETF probability bars ──────────────────────────────────────────────────────
 st.subheader("P(Beat Cash) — Next 5 Days")
 prob_cols = st.columns(len(TARGET_ETFS))
+
+# Get base rates from model bank if available
+base_rates = getattr(bank, "base_rates_", {t: 0.5 for t in TARGET_ETFS})
+
 for i, etf in enumerate(TARGET_ETFS):
-    p = float(last_p[i]) if i < len(last_p) else 0.5
-    delta_str = f"{(p - 0.5)*100:+.1f}pp vs 50%"
+    p    = float(last_p[i]) if i < len(last_p) else 0.5
+    base = base_rates.get(etf, 0.5)
+    adj  = p - base   # excess above historical base rate
     prob_cols[i].metric(
-        label=etf,
+        label=f"{etf}  (base {base*100:.0f}%)",
         value=f"{p*100:.1f}%",
-        delta=delta_str,
+        delta=f"{adj*100:+.1f}pp vs base",
         delta_color="normal"
     )
 
@@ -417,16 +427,14 @@ fig.add_trace(go.Scatter(
 ))
 
 fig.update_layout(
-    template="plotly_dark",
-    paper_bgcolor="#0e1117",
-    plot_bgcolor="#0e1117",
+    template="plotly_white",
     height=420,
     margin=dict(l=0, r=0, t=20, b=0),
     legend=dict(orientation="h", yanchor="bottom", y=1.02,
                 xanchor="right", x=1),
-    xaxis=dict(showgrid=False, color="#555"),
-    yaxis=dict(showgrid=True, gridcolor="#1a1a2e",
-               color="#555", title="Cumulative Return (×)"),
+    xaxis=dict(showgrid=False),
+    yaxis=dict(showgrid=True, gridcolor="#eeeeee",
+               title="Cumulative Return (×)"),
     hovermode="x unified",
 )
 st.plotly_chart(fig, use_container_width=True)
@@ -458,16 +466,14 @@ if "Regime_Name" in df.columns:
         ))
 
     fig_r.update_layout(
-        template="plotly_dark",
-        paper_bgcolor="#0e1117",
-        plot_bgcolor="#0e1117",
+        template="plotly_white",
         height=180,
         margin=dict(l=0, r=0, t=10, b=0),
         showlegend=True,
         legend=dict(orientation="h", yanchor="bottom", y=1.02,
                     xanchor="right", x=1),
-        xaxis=dict(showgrid=False, color="#555"),
-        yaxis=dict(showgrid=False, color="#555"),
+        xaxis=dict(showgrid=False),
+        yaxis=dict(showgrid=False),
     )
     st.plotly_chart(fig_r, use_container_width=True)
 
@@ -528,14 +534,11 @@ try:
             hovertemplate="%{y}<br>Mean Gain: %{x:.1f}<extra></extra>",
         ))
         fig_i.update_layout(
-            template="plotly_dark",
-            paper_bgcolor="#0e1117",
-            plot_bgcolor="#0e1117",
+            template="plotly_white",
             height=500,
             margin=dict(l=0, r=0, t=10, b=0),
-            xaxis=dict(title="Mean Gain", color="#555", showgrid=True,
-                       gridcolor="#1a1a2e"),
-            yaxis=dict(autorange="reversed", color="#555", showgrid=False),
+            xaxis=dict(title="Mean Gain", showgrid=True, gridcolor="#eeeeee"),
+            yaxis=dict(autorange="reversed", showgrid=False),
         )
         st.plotly_chart(fig_i, use_container_width=True)
 except Exception as e:
