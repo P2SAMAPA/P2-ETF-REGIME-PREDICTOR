@@ -40,6 +40,7 @@ try:
         load_signals_from_gitlab, load_model_from_gitlab,
         load_feature_list_from_gitlab, load_predictions_from_gitlab,
         load_momentum_ranker_from_gitlab, load_momentum_predictions_from_gitlab,
+        load_wf_momentum_predictions_from_gitlab, load_wf_ensemble_predictions_from_gitlab,
         TARGET_ETFS,
     )
     from regime_detection import RegimeDetector
@@ -144,6 +145,21 @@ with st.sidebar:
         )
     )
     use_momentum = "Option B" in layer2_mode
+    st.divider()
+    st.subheader("📊 Backtest Mode")
+    bt_mode = st.radio(
+        "Validation Method",
+        options=["In-Sample (Full History)", "Walk-Forward OOS"],
+        index=0,
+        help=(
+            "**In-Sample**: Model trained on full history, backtested on same data. "
+            "Returns will be optimistic — use for model development only.\n\n"
+            "**Walk-Forward OOS**: 3-year rolling training window, tested on "
+            "following year only. Model never sees test data. "
+            "This is the honest performance estimate."
+        )
+    )
+    use_wf = "Walk-Forward" in bt_mode
 
     st.divider()
     run_btn = st.button("🚀 Run Model", type="primary", use_container_width=True)
@@ -300,26 +316,43 @@ with st.spinner("📡 Loading predictions from GitLab..."):
             from models import get_feature_columns
             feature_cols = get_feature_columns(df)
 
-        if use_momentum:
-            pred_history = load_momentum_predictions_from_gitlab()
+        if use_wf:
+            # Walk-Forward OOS predictions
+            if use_momentum:
+                pred_history = load_wf_momentum_predictions_from_gitlab()
+                src_label = "Walk-Forward OOS — Option B Momentum"
+            else:
+                pred_history = load_wf_ensemble_predictions_from_gitlab()
+                src_label = "Walk-Forward OOS — Option A ML Ensemble"
             if pred_history is None:
-                st.warning("⚠️ Momentum predictions not found — generating now...")
-                pred_history = momentum_ranker.predict_all_history(df)
+                st.error("⚠️ Walk-Forward predictions not found. "
+                         "Trigger Manual Retrain with --wfcv enabled.")
+                st.stop()
         else:
-            pred_history = cached_load_predictions()
-            if pred_history is None:
-                st.warning("⚠️ ML predictions not found — generating now (slow)...")
-                feat_df = df.copy()
-                feat_df[feature_cols] = (feat_df[feature_cols]
-                                          .fillna(feat_df[feature_cols].median())
-                                          .fillna(0.0))
-                pred_history = bank.predict_all_history(feat_df)
+            # In-sample predictions
+            if use_momentum:
+                pred_history = load_momentum_predictions_from_gitlab()
+                if pred_history is None:
+                    st.warning("⚠️ Momentum predictions not found — generating now...")
+                    pred_history = momentum_ranker.predict_all_history(df)
+                src_label = "In-Sample — Option B Momentum"
+            else:
+                pred_history = cached_load_predictions()
+                if pred_history is None:
+                    st.warning("⚠️ ML predictions not found — generating now (slow)...")
+                    feat_df = df.copy()
+                    feat_df[feature_cols] = (feat_df[feature_cols]
+                                              .fillna(feat_df[feature_cols].median())
+                                              .fillna(0.0))
+                    pred_history = bank.predict_all_history(feat_df)
+                src_label = "In-Sample — Option A ML Ensemble"
 
         # Ensure DatetimeIndex and confirm load
         if pred_history is not None:
             pred_history.index = pd.to_datetime(pred_history.index)
-            st.success(f"✅ Predictions loaded: {len(pred_history):,} rows "
-                       f"({pred_history.index[0].date()} → {pred_history.index[-1].date()})")
+            st.success(f"✅ {src_label}: {len(pred_history):,} rows "
+                       f"({pred_history.index[0].date()} → "
+                       f"{pred_history.index[-1].date()})")
     except Exception as e:
         st.error(f"❌ Prediction load failed: {e}")
         st.stop()
