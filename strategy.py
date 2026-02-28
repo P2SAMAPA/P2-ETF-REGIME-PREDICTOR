@@ -268,8 +268,17 @@ def calculate_metrics(strat_rets: np.ndarray, rf_rate: float = 0.045) -> Dict:
     daily_rf    = rf_rate / 252
     excess      = strat_rets - daily_rf
     sharpe      = float(np.mean(excess)) / (float(np.std(excess)) + 1e-9) * np.sqrt(252)
-    recent      = strat_rets[-15:]
-    hit_ratio   = float(np.mean(recent > 0))
+    # Hit ratio over full backtest (exclude CASH days = risk-free rate)
+    # Use tolerance comparison — floating point means exact equality fails
+    daily_rf_scalar = rf_rate / 252
+    tol         = daily_rf_scalar * 0.01   # 1% tolerance
+    active_mask = np.abs(strat_rets - daily_rf_scalar) > tol
+    active_days = strat_rets[active_mask]
+    hit_ratio   = float(np.mean(active_days > 0)) if len(active_days) > 0 else 0.0
+    # Also compute recent 15d active days only
+    recent_rets_15d = strat_rets[-15:]
+    active_15d  = recent_rets_15d[np.abs(recent_rets_15d - daily_rf_scalar) > tol]
+    recent_15d  = float(np.mean(active_15d > 0)) if len(active_15d) > 0 else 0.0
     cum_max     = np.maximum.accumulate(cum)
     dd          = (cum - cum_max) / (cum_max + 1e-9)
     max_dd      = float(np.min(dd))
@@ -285,6 +294,7 @@ def calculate_metrics(strat_rets: np.ndarray, rf_rate: float = 0.045) -> Dict:
         "sharpe":       sharpe,
         "calmar":       calmar,
         "hit_ratio":    hit_ratio,
+        "hit_ratio_15d": recent_15d,
         "max_dd":       max_dd,
         "max_daily_dd": max_daily,
         "avg_win":      avg_win,
