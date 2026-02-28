@@ -237,8 +237,6 @@ with st.spinner("🧠 Loading models from GitLab..."):
         else:
             st.error("⚠️ Momentum ranker not found — run Manual Retrain first")
             momentum_ranker = None
-    
-        momentum_ranker = None
 if detector is None or momentum_ranker is None:
     st.error("Models not available. Trigger Manual Retrain in GitHub Actions first.")
     st.stop()
