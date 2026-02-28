@@ -1,21 +1,18 @@
 # daily_pipeline.yml
 # Runs every weekday at 6:30am EST (11:30 UTC)
-# Fetches new data, retrains models, pushes signal to GitLab
+# Fetches new data, fits momentum ranker, pushes signal to GitLab
+# Walk-forward OOS predictions refresh on the 1st of each month
 
 name: Daily Training Pipeline
 
 on:
   schedule:
-    - cron: "30 11 * * 1-5"   # 11:30 UTC = 6:30am EST (UTC-5)
-  workflow_dispatch:            # Allow manual trigger from GitHub Actions UI
+    - cron: "30 11 * * 1-5"   # 11:30 UTC = 6:30am EST, Mon-Fri (daily signal)
+    - cron: "0 12 1 * *"      # 12:00 UTC on 1st of each month (WF refresh trigger)
+  workflow_dispatch:
     inputs:
       force_refresh:
         description: "Force full dataset rebuild"
-        required: false
-        default: "false"
-        type: boolean
-      run_wfcv:
-        description: "Run walk-forward cross-validation"
         required: false
         default: "false"
         type: boolean
@@ -23,7 +20,8 @@ on:
 jobs:
   train:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 45
+    if: github.event_name == 'workflow_dispatch' || github.event.schedule == '30 11 * * 1-5'
 
     env:
       GITLAB_API_TOKEN: ${{ secrets.GITLAB_API_TOKEN }}
@@ -43,14 +41,11 @@ jobs:
       - name: Install dependencies
         run: pip install -r requirements.txt
 
-      - name: Run training pipeline
+      - name: Run daily training pipeline
         run: |
           ARGS=""
           if [ "${{ github.event.inputs.force_refresh }}" = "true" ]; then
             ARGS="$ARGS --force-refresh"
-          fi
-          if [ "${{ github.event.inputs.run_wfcv }}" = "true" ]; then
-            ARGS="$ARGS --wfcv"
           fi
           python train.py $ARGS
 
@@ -59,5 +54,39 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: pipeline-logs-${{ github.run_id }}
+          path: "*.log"
+          retention-days: 7
+
+  refresh_walkforward:
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    if: github.event.schedule == '0 12 1 * *'
+
+    env:
+      GITLAB_API_TOKEN: ${{ secrets.GITLAB_API_TOKEN }}
+      GITLAB_REPO_URL:  ${{ secrets.GITLAB_REPO_URL }}
+      FRED_API_KEY:     ${{ secrets.FRED_API_KEY }}
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Refresh walk-forward OOS predictions
+        run: python train.py --wfcv-only
+
+      - name: Upload WF logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: wf-refresh-logs-${{ github.run_id }}
           path: "*.log"
           retention-days: 7
