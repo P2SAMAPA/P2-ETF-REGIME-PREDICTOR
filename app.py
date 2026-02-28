@@ -44,7 +44,7 @@ try:
         TARGET_ETFS,
     )
     from regime_detection import RegimeDetector
-    from models import RegimeModelBank, MomentumRanker
+    from models import MomentumRanker
     from strategy import (
         execute_strategy, calculate_metrics,
         calculate_benchmark_metrics, TARGET_ETFS as STRAT_ETFS,
@@ -72,11 +72,7 @@ def cached_load_detector():
     return None
 
 @st.cache_resource(ttl=3600, show_spinner=False)
-def cached_load_bank():
-    data = load_model_from_gitlab("model_bank.pkl")
-    if data:
-        return RegimeModelBank.from_bytes(data)
-    return None
+
 
 @st.cache_data(ttl=3600, show_spinner=False)
 def cached_load_feature_list():
@@ -93,7 +89,7 @@ BENCHMARK_COLS = {"SPY": "SPY_Ret", "AGG": "AGG_Ret"}
 with st.sidebar:
     st.image("https://img.icons8.com/fluency/96/combo-chart.png", width=60)
     st.title("P2-ETF Regime Predictor")
-    st.caption("Wasserstein Regime Detection + LightGBM Ensemble")
+    st.caption("Wasserstein Regime Detection + Momentum Ranking")
 
     now_est = get_est_time()
     st.write(f"🕒 **EST:** {now_est.strftime('%a %b %d, %H:%M')}")
@@ -128,23 +124,7 @@ with st.sidebar:
 
     st.subheader("📊 Display")
     benchmark = st.selectbox("Benchmark", ["SPY", "AGG", "None"])
-    show_wfcv = st.checkbox("Show Walk-Forward CV", value=False)
-    st.divider()
-    st.subheader("🧠 Layer 2 Mode")
-    layer2_mode = st.radio(
-        "ETF Ranking Method",
-        options=["Option A — ML Ensemble", "Option B — Momentum"],
-        index=0,
-        help=(
-            "**Option A — ML Ensemble**: XGBoost + Ridge + LambdaRank trained "
-            "per market regime. Enters only when ≥2/3 models agree. "
-            "Best when macro patterns are regime-consistent.\n\n"
-            "**Option B — Momentum**: Pure Rate-of-Change ranking — 5d/10d/21d/63d "
-            "RoC + volume accumulation + 20d breakout score. No ML, fully "
-            "transparent. Best when trends are strong and persistent."
-        )
-    )
-    use_momentum = "Option B" in layer2_mode
+    use_momentum = True  # Momentum (Option B) — sole ranking method
     st.divider()
     st.subheader("📊 Backtest Mode")
     bt_mode = st.radio(
@@ -167,11 +147,8 @@ with st.sidebar:
 
 # ── Main panel ────────────────────────────────────────────────────────────────
 st.title("📈 P2-ETF Regime-Aware Rotation Model")
-mode_label = ("Option B — Momentum (RoC + Volume + Breakout)"
-               if use_momentum else
-               "Option A — ML Ensemble (XGBoost + Ridge + LambdaRank voting)")
 st.caption(
-    f"Wasserstein k-means regime detection • {mode_label} • "
+    "Wasserstein k-means regime detection • Momentum Ranking (RoC + OBV + Breakout) • "
     "ETFs: TLT · VNQ · SLV · GLD · LQD · HYG"
 )
 
@@ -260,19 +237,9 @@ with st.spinner("🧠 Loading models from GitLab..."):
         else:
             st.error("⚠️ Momentum ranker not found — run Manual Retrain first")
             momentum_ranker = None
-            bank = None
-    else:
-        # Layer 2A — ML Ensemble
-        bank = cached_load_bank()
+    
         momentum_ranker = None
-        if bank:
-            n_regime = len(getattr(bank, "models_", {}))
-            st.success(f"✅ ML Ensemble loaded — Option A "
-                       f"({n_regime} regime models, XGBoost+Ridge+LambdaRank voting)")
-        else:
-            st.warning("⚠️ ML model bank not found — run pipeline first")
-
-if detector is None or (bank is None and momentum_ranker is None):
+if detector is None or momentum_ranker is None:
     st.error("Models not available. Trigger Manual Retrain in GitHub Actions first.")
     st.stop()
 
@@ -311,43 +278,20 @@ with st.spinner("🔍 Applying regime labels..."):
 # ── Generate prediction history ───────────────────────────────────────────────
 with st.spinner("📡 Loading predictions from GitLab..."):
     try:
-        feature_cols = cached_load_feature_list()
-        if feature_cols is None:
-            from models import get_feature_columns
-            feature_cols = get_feature_columns(df)
-
         if use_wf:
-            # Walk-Forward OOS predictions
-            if use_momentum:
-                pred_history = load_wf_momentum_predictions_from_gitlab()
-                src_label = "Walk-Forward OOS — Option B Momentum"
-            else:
-                pred_history = load_wf_ensemble_predictions_from_gitlab()
-                src_label = "Walk-Forward OOS — Option A ML Ensemble"
+            pred_history = load_wf_momentum_predictions_from_gitlab()
+            src_label = "Walk-Forward OOS"
             if pred_history is None:
                 st.error("⚠️ Walk-Forward predictions not found. "
-                         "Trigger Manual Retrain with --wfcv enabled.")
+                         "Trigger Manual Retrain with run_wfcv=true.")
                 st.stop()
         else:
-            # In-sample predictions
-            if use_momentum:
-                pred_history = load_momentum_predictions_from_gitlab()
-                if pred_history is None:
-                    st.warning("⚠️ Momentum predictions not found — generating now...")
-                    pred_history = momentum_ranker.predict_all_history(df)
-                src_label = "In-Sample — Option B Momentum"
-            else:
-                pred_history = cached_load_predictions()
-                if pred_history is None:
-                    st.warning("⚠️ ML predictions not found — generating now (slow)...")
-                    feat_df = df.copy()
-                    feat_df[feature_cols] = (feat_df[feature_cols]
-                                              .fillna(feat_df[feature_cols].median())
-                                              .fillna(0.0))
-                    pred_history = bank.predict_all_history(feat_df)
-                src_label = "In-Sample — Option A ML Ensemble"
+            pred_history = load_momentum_predictions_from_gitlab()
+            src_label = "In-Sample"
+            if pred_history is None:
+                st.warning("⚠️ Momentum predictions not found — generating now...")
+                pred_history = momentum_ranker.predict_all_history(df)
 
-        # Ensure DatetimeIndex and confirm load
         if pred_history is not None:
             pred_history.index = pd.to_datetime(pred_history.index)
             st.success(f"✅ {src_label}: {len(pred_history):,} rows "
@@ -439,8 +383,7 @@ st.markdown(f"""
 # ── ETF probability bars ──────────────────────────────────────────────────────
 st.subheader("P(Beat Cash) — Next 5 Days")
 
-# Get base rates from model bank if available
-base_rates = getattr(bank, "base_rates_", {t: 0.5 for t in TARGET_ETFS})              if bank else {t: 0.5 for t in TARGET_ETFS}
+base_rates = {t: 0.5 for t in TARGET_ETFS}
 
 # Split into two rows for 7 ETFs
 row1_etfs = TARGET_ETFS[:4]
@@ -692,30 +635,7 @@ if use_momentum:
         yaxis=dict(autorange="reversed", showgrid=False),
     )
     st.plotly_chart(fig_i, use_container_width=True)
-else:
-    st.subheader("🔍 Option A — Top 20 Features by Ensemble Gain")
-    try:
-        from models import aggregate_feature_importance
-        imp_df = aggregate_feature_importance(bank).head(20)
-        if not imp_df.empty:
-            fig_i = go.Figure(go.Bar(
-                x=imp_df["Mean_Gain"],
-                y=imp_df["Feature"],
-                orientation="h",
-                marker_color="#00d1b2",
-                hovertemplate="%{y}<br>Mean Gain: %{x:.1f}<extra></extra>",
-            ))
-            fig_i.update_layout(
-                template="plotly_white",
-                height=500,
-                margin=dict(l=0, r=0, t=10, b=0),
-                xaxis=dict(title="Mean Gain (LambdaRank + XGBoost)",
-                           showgrid=True, gridcolor="#eeeeee"),
-                yaxis=dict(autorange="reversed", showgrid=False),
-            )
-            st.plotly_chart(fig_i, use_container_width=True)
-    except Exception as e:
-        st.info(f"Feature importance not available: {e}")
+
 
 # ═════════════════════════════════════════════════════════════════════════════
 # SIGNALS HISTORY
@@ -757,22 +677,19 @@ financial returns.</p>
 Current model: <b>k={detector.optimal_k_ if detector else '?'}</b> regimes —
 {', '.join(detector.regime_names_.values()) if detector and detector.regime_names_ else 'loading...'}</p>
 
-<h4 style="color:#00d1b2;">🤖 Layer 2 — LightGBM + Logistic Regression Ensemble</h4>
-<p>For each regime, <b>5 independent binary classifiers</b> are trained — one per ETF.
-Each model answers: <em>"Will this ETF beat the 3M T-Bill rate over the next
-5 trading days?"</em></p>
+<h4 style="color:#00d1b2;">📈 Layer 2 — Momentum Ranking</h4>
+<p>A pure rules-based composite momentum score ranks all 6 ETFs each day.
+The top-ranked ETF with sufficient conviction (Z ≥ threshold) is selected.
+No ML — fully transparent and interpretable.</p>
 <ul>
-  <li><b>LightGBM</b> captures non-linear feature interactions
-      (60% ensemble weight)</li>
-  <li><b>Logistic Regression (L1)</b> provides a sparse linear baseline
-      (40% weight)</li>
-  <li>When models <b>disagree</b> beyond {15}%, effective conviction is
-      halved — natural uncertainty filter</li>
-  <li>Falls back to global model when a regime has fewer than 150 rows</li>
+  <li><b>Rate-of-Change (RoC):</b> 40% × 5d + 30% × 10d + 20% × 21d + 10% × 63d</li>
+  <li><b>OBV accumulation:</b> 15% weight — volume-weighted momentum confirmation</li>
+  <li><b>20d Breakout score:</b> 15% weight — position within rolling high/low range</li>
+  <li>Scores Z-normalised cross-sectionally across all 6 ETFs each day</li>
 </ul>
 
 <h4 style="color:#00d1b2;">📊 Input Features</h4>
-<p>~{len(feature_cols) if feature_cols else '?'} features across:</p>
+<p>FRED macro signals used for regime detection only:</p>
 <ul>
   <li><b>FRED macro:</b> DGS10, T10Y2Y, T10Y3M, DTB3, MORTGAGE30US, VIXCLS,
       DTWEXBGS, DCOILWTICO, BAMLC0A0CM, BAMLH0A0HYM2, UMCSENT, T10YIE</li>
@@ -790,24 +707,19 @@ Each model answers: <em>"Will this ETF beat the 3M T-Bill rate over the next
       earning {rf_rate*100:.2f}% annualised</li>
   <li><b>Stop-loss:</b> 2-day cumulative loss ≤ {stop_loss_pct*100:.0f}% → CASH
       until Z ≥ {z_reentry:.1f}σ</li>
-  <li><b>Rotation:</b> if top pick 5-day cumulative return &lt; 0 →
-      rotate to #2 ranked ETF until top pick has positive day</li>
-  <li><b>Disagreement filter:</b> LightGBM vs LogReg disagreement &gt; 15%
-      → conviction halved</li>
+
   <li><b>Transaction cost:</b> {fee_bps}bps per one-way trade</li>
 </ul>
 
 <h4 style="color:#00d1b2;">🔄 Daily Pipeline</h4>
 <p>GitHub Actions runs at 6:30am EST every weekday:
-fetch new data → detect regime → retrain models → generate signal →
-push to GitLab. This UI is read-only — loads pre-trained models
-and pre-computed signals from GitLab at runtime.</p>
+fetch new data → detect regime → fit momentum ranker → generate signal →
+push to GitLab. Walk-forward OOS predictions refresh monthly.
+This UI is read-only — loads pre-computed signals from GitLab at runtime.</p>
 
 <h4 style="color:#ff6b6b;">⚠️ Important Caveats</h4>
 <ul>
   <li>Past performance does not guarantee future results</li>
-  <li>TBT is a leveraged inverse ETF with structural decay — unsuitable
-      for long holding periods</li>
   <li>Backtest includes transaction costs but not slippage or
       liquidity constraints</li>
   <li>This is a research tool, not investment advice</li>
