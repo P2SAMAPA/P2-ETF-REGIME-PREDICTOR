@@ -729,3 +729,114 @@ class MomentumRanker:
     @staticmethod
     def from_bytes(data: bytes) -> "MomentumRanker":
         return pickle.loads(data)
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# WALK-FORWARD CROSS-VALIDATION
+# ═══════════════════════════════════════════════════════════════════════════════
+
+def walk_forward_cv(
+    df:           pd.DataFrame,
+    fwd_df:       pd.DataFrame,
+    mode:         str   = "momentum",   # "momentum" or "ensemble"
+    train_years:  int   = 3,
+    test_years:   int   = 1,
+    feature_cols: Optional[List[str]] = None,
+) -> pd.DataFrame:
+    """
+    Walk-forward out-of-sample validation for both Layer 2 modes.
+
+    For each fold:
+      - Fit fresh model on train window only
+      - Predict on test window only (model never sees test data)
+      - Roll forward by test_years
+
+    Returns concatenated OOS predictions DataFrame (same schema as
+    predict_all_history output) covering the full backtest period.
+
+    Parameters
+    ----------
+    df           : full feature DataFrame with Regime column
+    fwd_df       : forward return targets DataFrame
+    mode         : "momentum" (Option B) or "ensemble" (Option A)
+    train_years  : years of training data per fold
+    test_years   : years of OOS test data per fold
+    feature_cols : feature columns for ensemble mode
+    """
+    TRAIN_DAYS = int(train_years * 252)
+    TEST_DAYS  = int(test_years  * 252)
+
+    log.info(f"Walk-forward CV: mode={mode}, "
+             f"train={train_years}y, test={test_years}y")
+
+    if feature_cols is None and mode == "ensemble":
+        feature_cols = get_feature_columns(df)
+
+    all_preds = []
+    n         = len(df)
+    fold      = 0
+
+    start = TRAIN_DAYS  # first test fold starts after first training window
+
+    while start < n:
+        end      = min(start + TEST_DAYS, n)
+        tr_start = max(0, start - TRAIN_DAYS)
+
+        df_train  = df.iloc[tr_start:start]
+        df_test   = df.iloc[start:end]
+        fwd_train = fwd_df.iloc[tr_start:start]
+
+        if len(df_train) < 252 or len(df_test) < 5:
+            start += TEST_DAYS
+            continue
+
+        fold += 1
+        log.info(f"  Fold {fold}: train {df_train.index[0].date()} → "
+                 f"{df_train.index[-1].date()} | "
+                 f"test {df_test.index[0].date()} → "
+                 f"{df_test.index[-1].date()} "
+                 f"({len(df_train)} train, {len(df_test)} test days)")
+
+        try:
+            if mode == "momentum":
+                model = MomentumRanker()
+                model.fit(df_train)
+                preds = model.predict_all_history(df_test)
+
+            else:  # ensemble
+                # Clean features
+                df_tr_c = df_train.copy()
+                df_tr_c[feature_cols] = (
+                    df_tr_c[feature_cols]
+                    .fillna(df_tr_c[feature_cols].median())
+                    .fillna(0.0)
+                )
+                bank = RegimeModelBank()
+                bank.fit(df_tr_c, fwd_train, feature_cols=feature_cols,
+                         val_pct=0.15)
+
+                df_te_c = df_test.copy()
+                df_te_c[feature_cols] = (
+                    df_te_c[feature_cols]
+                    .fillna(df_tr_c[feature_cols].median())
+                    .fillna(0.0)
+                )
+                preds = bank.predict_all_history(df_te_c)
+
+            all_preds.append(preds)
+            log.info(f"  Fold {fold} complete: {len(preds)} predictions")
+
+        except Exception as e:
+            log.error(f"  Fold {fold} failed: {e}")
+
+        start += TEST_DAYS
+
+    if not all_preds:
+        log.error("Walk-forward CV produced no predictions")
+        return pd.DataFrame()
+
+    result = pd.concat(all_preds).sort_index()
+    # Remove any duplicate dates (overlap at fold boundaries)
+    result = result[~result.index.duplicated(keep="last")]
+    log.info(f"Walk-forward complete: {len(result)} OOS days across {fold} folds")
+    return result
