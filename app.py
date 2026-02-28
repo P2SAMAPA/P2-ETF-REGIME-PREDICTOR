@@ -448,15 +448,19 @@ c3.metric("🎯 Hit Ratio (Full)",
 c4.metric("📉 Max Drawdown",
           f"{metrics.get('max_dd',0)*100:.2f}%",
           delta="Peak to Trough")
+worst_idx  = metrics.get("max_daily_idx", 0)
+worst_date = pred_bt.index[min(worst_idx, len(pred_bt)-1)].strftime("%d %b %Y")
 c5.metric("⚠️ Worst Day",
           f"{metrics.get('max_daily_dd',0)*100:.2f}%",
-          delta="Max Daily Loss")
+          delta=f"on {worst_date}")
 
 # Secondary metrics row
 c6, c7, c8, c9, c10 = st.columns(5)
+dd_idx  = metrics.get("max_dd_idx", 0)
+dd_date = pred_bt.index[min(dd_idx, len(pred_bt)-1)].strftime("%d %b %Y")
 c6.metric("🏆 Calmar",
           f"{metrics.get('calmar',0):.2f}",
-          delta="Ann Return / MaxDD")
+          delta=f"MaxDD on {dd_date}")
 c7.metric("✅ Avg Win",
           f"{metrics.get('avg_win',0)*100:.2f}%",
           delta="Daily")
