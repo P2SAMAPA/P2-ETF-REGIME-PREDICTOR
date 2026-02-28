@@ -279,6 +279,42 @@ def run_pipeline(force_refresh: bool = False,
             log.error(f"  Momentum ranker failed: {e}")
 
 
+
+        # ── Walk-forward OOS validation ──────────────────────────────────
+        if args.wfcv:
+            log.info("Step 6: Walk-forward OOS validation (3y train / 1y test)...")
+            try:
+                # Option B — Momentum WF
+                log.info("  Running Option B (Momentum) walk-forward...")
+                wf_mom = walk_forward_cv(
+                    df=df, fwd_df=fwd_df,
+                    mode="momentum",
+                    train_years=3, test_years=1,
+                )
+                if not wf_mom.empty:
+                    ok = save_predictions_to_gitlab(
+                        wf_mom, "data/wf_mom_pred_history.csv"
+                    )
+                    log.info(f"  WF momentum saved ({len(wf_mom)} OOS days): {ok}")
+
+                # Option A — Ensemble WF
+                log.info("  Running Option A (Ensemble) walk-forward...")
+                wf_ens = walk_forward_cv(
+                    df=df, fwd_df=fwd_df,
+                    mode="ensemble",
+                    train_years=3, test_years=1,
+                    feature_cols=feature_cols,
+                )
+                if not wf_ens.empty:
+                    ok = save_predictions_to_gitlab(
+                        wf_ens, "data/wf_pred_history.csv"
+                    )
+                    log.info(f"  WF ensemble saved ({len(wf_ens)} OOS days): {ok}")
+            except Exception as e:
+                log.error(f"  Walk-forward failed: {e}")
+        else:
+            log.info("Step 6: Skipping walk-forward (--wfcv not set)")
+
         # Signals
         ok = save_signals_to_gitlab(signal_row)
         log.info(f"  Signal saved: {ok}")
