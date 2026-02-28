@@ -43,7 +43,7 @@ from data_manager import (
     load_model_from_gitlab, TARGET_ETFS,
 )
 from regime_detection import RegimeDetector
-from models import RegimeModelBank, MomentumRanker, get_feature_columns
+from models import MomentumRanker, get_feature_columns
 from strategy import (
     execute_strategy, calculate_metrics,
     build_signal_row, TARGET_ETFS as STRAT_ETFS,
@@ -149,7 +149,6 @@ def run_pipeline(force_refresh: bool = False,
     ).fillna(0.0)
     log.info("NaN cleaning applied to feature matrix")
 
-    bank = RegimeModelBank()
     try:
         bank.fit(df_train, fwd_train,
                  feature_cols=feature_cols,
@@ -296,20 +295,6 @@ def run_pipeline(force_refresh: bool = False,
                         wf_mom, "data/wf_mom_pred_history.csv"
                     )
                     log.info(f"  WF momentum saved ({len(wf_mom)} OOS days): {ok}")
-
-                # Option A — Ensemble WF
-                log.info("  Running Option A (Ensemble) walk-forward...")
-                wf_ens = walk_forward_cv(
-                    df=df, fwd_df=fwd_df,
-                    mode="ensemble",
-                    train_years=3, test_years=1,
-                    feature_cols=feature_cols,
-                )
-                if not wf_ens.empty:
-                    ok = save_predictions_to_gitlab(
-                        wf_ens, "data/wf_pred_history.csv"
-                    )
-                    log.info(f"  WF ensemble saved ({len(wf_ens)} OOS days): {ok}")
             except Exception as e:
                 log.error(f"  Walk-forward failed: {e}")
         else:
@@ -324,16 +309,7 @@ def run_pipeline(force_refresh: bool = False,
         log.info("Step 8: Skipping GitLab write (--local flag set)")
         results["gitlab_saved"] = False
 
-    # ── Optional: Walk-forward CV ──────────────────────────────────────────────
-    if run_wfcv:
-        log.info("Running walk-forward cross-validation (diagnostic)...")
-        from models import walk_forward_cv
-        try:
-            wfcv_results = walk_forward_cv(df_train, fwd_train, n_splits=5)
-            log.info(f"\nWalk-forward CV results:\n{wfcv_results.to_string()}")
-            results["wfcv"] = wfcv_results.to_dict()
-        except Exception as e:
-            log.error(f"Walk-forward CV failed: {e}")
+
 
     log.info("=" * 60)
     log.info("Pipeline complete.")
@@ -375,7 +351,7 @@ if __name__ == "__main__":
         log.info("=== WALK-FORWARD ONLY MODE ===")
         from data_manager import get_data, build_forward_targets
         from models import (get_feature_columns, walk_forward_cv,
-                            MomentumRanker, RegimeModelBank)
+                            MomentumRanker)
         from data_manager import save_predictions_to_gitlab
         df     = get_data(start_year=2008)
         fwd_df = build_forward_targets(df)
@@ -387,13 +363,6 @@ if __name__ == "__main__":
         if not wf_mom.empty:
             save_predictions_to_gitlab(wf_mom, "data/wf_mom_pred_history.csv")
             log.info(f"WF momentum saved: {len(wf_mom)} OOS days")
-        # Option A
-        log.info("Running WF Option A (Ensemble)...")
-        wf_ens = walk_forward_cv(df=df, fwd_df=fwd_df, mode="ensemble",
-                                  train_years=3, test_years=1, feature_cols=fc)
-        if not wf_ens.empty:
-            save_predictions_to_gitlab(wf_ens, "data/wf_pred_history.csv")
-            log.info(f"WF ensemble saved: {len(wf_ens)} OOS days")
         log.info("Walk-forward complete")
         sys.exit(0)
 
