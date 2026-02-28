@@ -134,6 +134,8 @@ def run_pipeline(force_refresh: bool = False,
 
     # ── Step 4: Train model bank ───────────────────────────────────────────────
     log.info("Step 4: Training LightGBM + LogReg model bank...")
+    from models import MomentumRanker, RegimeModelBank
+    bank = RegimeModelBank()
 
     # Align df and fwd_df — drop rows where targets are all NaN (last 5 rows)
     common_idx = df.index.intersection(fwd_df.dropna(how="all").index)
