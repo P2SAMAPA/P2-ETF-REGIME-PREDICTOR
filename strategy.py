@@ -279,11 +279,13 @@ def calculate_metrics(strat_rets: np.ndarray, rf_rate: float = 0.045) -> Dict:
     recent_rets_15d = strat_rets[-15:]
     active_15d  = recent_rets_15d[np.abs(recent_rets_15d - daily_rf_scalar) > tol]
     recent_15d  = float(np.mean(active_15d > 0)) if len(active_15d) > 0 else 0.0
-    cum_max     = np.maximum.accumulate(cum)
-    dd          = (cum - cum_max) / (cum_max + 1e-9)
-    max_dd      = float(np.min(dd))
-    max_daily   = float(np.min(strat_rets))
-    calmar      = ann_ret / (abs(max_dd) + 1e-9)
+    cum_max        = np.maximum.accumulate(cum)
+    dd             = (cum - cum_max) / (cum_max + 1e-9)
+    max_dd         = float(np.min(dd))
+    max_dd_idx     = int(np.argmin(dd))
+    max_daily      = float(np.min(strat_rets))
+    max_daily_idx  = int(np.argmin(strat_rets))
+    calmar         = ann_ret / (abs(max_dd) + 1e-9)
     wins        = strat_rets[strat_rets > 0]
     losses      = strat_rets[strat_rets < 0]
     avg_win     = float(np.mean(wins))   if len(wins)   > 0 else 0.0
@@ -295,8 +297,10 @@ def calculate_metrics(strat_rets: np.ndarray, rf_rate: float = 0.045) -> Dict:
         "calmar":       calmar,
         "hit_ratio":    hit_ratio,
         "hit_ratio_15d": recent_15d,
-        "max_dd":       max_dd,
-        "max_daily_dd": max_daily,
+        "max_dd":         max_dd,
+        "max_dd_idx":     max_dd_idx,
+        "max_daily_dd":   max_daily,
+        "max_daily_idx":  max_daily_idx,
         "avg_win":      avg_win,
         "avg_loss":     avg_loss,
         "win_loss_r":   abs(avg_win / (avg_loss + 1e-9)),
