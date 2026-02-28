@@ -361,10 +361,41 @@ if __name__ == "__main__":
         help="Run without writing to GitLab (for local testing)"
     )
     parser.add_argument(
+        "--wfcv-only", action="store_true",
+        help="Run walk-forward CV only — skip data fetch and model retrain"
+    )
+    parser.add_argument(
         "--wfcv", action="store_true",
         help="Run walk-forward cross-validation (diagnostic, slower)"
     )
     args = parser.parse_args()
+
+    # Walk-forward only mode — load existing data, skip retrain
+    if args.wfcv_only:
+        log.info("=== WALK-FORWARD ONLY MODE ===")
+        from data_manager import get_data, build_forward_targets
+        from models import (get_feature_columns, walk_forward_cv,
+                            MomentumRanker, RegimeModelBank)
+        from data_manager import save_predictions_to_gitlab
+        df     = get_data(start_year=2008)
+        fwd_df = build_forward_targets(df)
+        fc     = get_feature_columns(df)
+        # Option B
+        log.info("Running WF Option B (Momentum)...")
+        wf_mom = walk_forward_cv(df=df, fwd_df=fwd_df, mode="momentum",
+                                  train_years=3, test_years=1)
+        if not wf_mom.empty:
+            save_predictions_to_gitlab(wf_mom, "data/wf_mom_pred_history.csv")
+            log.info(f"WF momentum saved: {len(wf_mom)} OOS days")
+        # Option A
+        log.info("Running WF Option A (Ensemble)...")
+        wf_ens = walk_forward_cv(df=df, fwd_df=fwd_df, mode="ensemble",
+                                  train_years=3, test_years=1, feature_cols=fc)
+        if not wf_ens.empty:
+            save_predictions_to_gitlab(wf_ens, "data/wf_pred_history.csv")
+            log.info(f"WF ensemble saved: {len(wf_ens)} OOS days")
+        log.info("Walk-forward complete")
+        sys.exit(0)
 
     results = run_pipeline(
         force_refresh     = args.force_refresh,
