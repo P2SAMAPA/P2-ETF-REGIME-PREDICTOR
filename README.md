@@ -1,12 +1,12 @@
 # P2-ETF-REGIME-PREDICTOR
 
-A regime-aware ETF rotation model combining Wasserstein distance-based market clustering with a LightGBM + Logistic Regression ensemble to generate daily trading signals across 5 fixed income and commodity ETFs.
+A regime-aware ETF momentum rotation model combining Wasserstein distance-based market clustering with a composite momentum ranking score to generate daily trading signals across 6 fixed income and commodity ETFs.
 
 ---
 
 ## Overview
 
-Most quantitative models treat all market environments the same. This model explicitly detects the current market regime before making predictions — a regime of rising rates calls for different signals than a crisis or risk-on environment. The key insight is borrowed from academic research: instead of assuming returns follow a known distribution, we treat each rolling window of returns as an empirical probability distribution and measure how far apart those distributions are using the Wasserstein distance.
+Most quantitative models treat all market environments the same. This model explicitly detects the current market regime before ranking ETFs — a regime of rising rates calls for different momentum signals than a crisis or risk-on environment.
 
 The model answers one practical question each trading day: **which ETF is most likely to beat the risk-free rate over the next 5 trading days?**
 
@@ -29,35 +29,31 @@ The optimal number of regimes k is auto-selected using Maximum Mean Discrepancy 
 | Rate-Rising | Inverted/flattening yield curve, rising DGS10 |
 | Crisis | Very high VIX, extreme HY spread widening |
 
-### Layer 2 — LightGBM + Logistic Regression Ensemble
+### Layer 2 — Momentum Ranking
 
-For each regime, **5 independent binary classifiers** are trained — one per ETF. Each model answers: *"Will this ETF beat the 3M T-Bill rate over the next 5 trading days?"*
+A pure rules-based composite momentum score ranks all 6 ETFs each day. The top-ranked ETF with sufficient conviction enters; below threshold the strategy holds CASH earning the 3M T-Bill rate.
 
-- **LightGBM** captures non-linear interactions between macro features (60% ensemble weight)
-- **Logistic Regression (L1)** provides a sparse interpretable baseline (40% weight)
-- When the two models **disagree** by more than 15%, conviction is halved — a natural uncertainty filter
-- Falls back to a global model when a regime has fewer than 150 training rows
+**Composite score weights:**
+- 40% × Rate-of-Change 5d
+- 30% × Rate-of-Change 10d
+- 20% × Rate-of-Change 21d
+- 10% × Rate-of-Change 63d
+- 15% × OBV accumulation (21d volume-weighted momentum)
+- 15% × 20d Breakout score (position within rolling high/low range)
 
-### Input Features (~60-70 signals)
-
-**FRED Macro:**
-DGS10 · T10Y2Y · T10Y3M · DTB3 · MORTGAGE30US · VIXCLS · DTWEXBGS · DCOILWTICO · BAMLC0A0CM · BAMLH0A0HYM2 · UMCSENT · T10YIE
-
-**Derived Macro:**
-Real Yield (DGS10 − T10YIE) · Rate momentum (20d/60d) · Rising/falling regime flags · Yield curve shape flags · Inflation regime · VIX regime · Credit stress · Rolling Z-scores (60d window)
-
-**ETF Signals (per ETF):**
-Daily return · Realised volatility (10d/21d) · Momentum (5d/21d/63d) · Volume ratio · ATR14 · Relative strength vs SPY
+Scores are Z-normalised cross-sectionally across all 6 ETFs each day. The top-ranked ETF with Z ≥ threshold enters; otherwise CASH.
 
 ### Strategy Execution
 
 | Rule | Detail |
 |------|--------|
-| Conviction gate | Z-score ≥ 0.5σ to enter — below this earns 3M T-Bill |
+| Conviction gate | Z-score ≥ 0.7σ to enter — below this earns 3M T-Bill |
 | Stop-loss | 2-day cumulative loss ≤ −12% → CASH until Z ≥ 1.0σ |
-| Rotation | Top pick 5-day cumulative loss → rotate to #2 ETF |
-| Disagreement filter | LightGBM vs LogReg gap > 15% → halve conviction |
 | Transaction cost | 5bps per one-way trade |
+
+### Walk-Forward Validation
+
+Performance is validated using rolling 3-year training / 1-year test windows across the full history (2011–2026), producing 3,812 genuinely out-of-sample days. The model never sees test-period data during training for any fold. Walk-forward OOS predictions refresh monthly.
 
 ---
 
@@ -66,10 +62,11 @@ Daily return · Realised volatility (10d/21d) · Momentum (5d/21d/63d) · Volume
 | ETF | Description | Regime Affinity |
 |-----|-------------|-----------------|
 | TLT | iShares 20+ Year Treasury Bond | Risk-Off, Rate-Falling |
-| TBT | ProShares UltraShort 20+ Year Treasury | Rate-Rising |
 | VNQ | Vanguard Real Estate ETF | Risk-On, low inflation |
 | SLV | iShares Silver Trust | Crisis, high inflation |
 | GLD | SPDR Gold Shares | Crisis, Stagflation |
+| LQD | iShares Investment Grade Corporate Bond | Risk-On, stable rates |
+| HYG | iShares High Yield Corporate Bond | Risk-On, credit expansion |
 
 Benchmarks: SPY (S&P 500) · AGG (US Aggregate Bond)
 
@@ -78,37 +75,41 @@ Benchmarks: SPY (S&P 500) · AGG (US Aggregate Bond)
 ## Infrastructure
 
 ```
-GitHub (this repo)          — code + GitHub Actions workflows
+GitHub (this repo)               — code + GitHub Actions workflows
 GitLab (p2-etf-regime-predictor) — dataset, models, signals storage
-GitHub Actions              — daily 6:30am EST training pipeline
-Streamlit Community Cloud   — read-only UI
+GitHub Actions                   — daily 6:30am EST training pipeline
+Streamlit Community Cloud        — read-only UI
 ```
 
-### Daily Pipeline (GitHub Actions, 6:30am EST weekdays)
+### Daily Pipeline (GitHub Actions)
 
 ```
+Weekday 6:30am EST:
 1. Load dataset from GitLab
 2. Fetch yesterday's new data (yfinance + FRED)
 3. Wasserstein k-means regime detection
-4. Build binary forward return targets (5-day horizon)
-5. Train LightGBM + LogReg per (ETF, regime)
-6. Generate prediction history for backtest
-7. Produce next-day signal
-8. Push dataset, models, signals to GitLab
+4. Fit MomentumRanker on full history
+5. Generate in-sample prediction history
+6. Produce next-day signal
+7. Push dataset, model, predictions, signal to GitLab
+
+1st of each month (automatic):
+8. Run walk-forward OOS validation (3y train / 1y test, rolling)
+9. Save fresh OOS predictions to GitLab
 ```
 
 ### GitLab Storage Structure
 
 ```
 data/
-  etf_data.csv          — full feature dataset, daily updated
+  etf_data.csv              — full feature dataset, daily updated
+  mom_pred_history.csv      — in-sample momentum predictions
+  wf_mom_pred_history.csv   — walk-forward OOS predictions (monthly refresh)
 models/
-  regime_detector.pkl   — fitted WassersteinKMeans model
-  model_bank.pkl        — all regime-specific classifiers
+  regime_detector.pkl       — fitted WassersteinKMeans model
+  momentum_ranker.pkl       — fitted MomentumRanker
 signals/
-  signals.csv           — daily signal log
-meta/
-  feature_list.json     — saved feature names for inference consistency
+  signals.csv               — daily signal log
 ```
 
 ---
@@ -120,16 +121,14 @@ P2-ETF-REGIME-PREDICTOR/
 ├── app.py                  # Streamlit UI (read-only, loads from GitLab)
 ├── train.py                # Pipeline orchestrator (called by Actions)
 ├── data_manager.py         # FRED + yfinance fetching, feature engineering
-├── regime_detection.py     # Wasserstein k-means implementation
-├── models.py               # LightGBM + LogReg ensemble, RegimeModelBank
+├── models.py               # MomentumRanker + walk-forward CV
 ├── strategy.py             # Signal execution, backtesting, metrics
-├── utils.py                # Shared helpers
 ├── requirements.txt
 ├── README.md
 └── .github/
     └── workflows/
-        ├── daily_pipeline.yml    # Weekday 6:30am EST run
-        └── manual_retrain.yml    # On-demand full rebuild
+        ├── daily_pipeline.yml    # Weekday 6:30am EST + monthly WF refresh
+        └── manual_retrain.yml    # On-demand full rebuild or WF run
 ```
 
 ---
@@ -157,24 +156,25 @@ FRED_API_KEY     = "your_fred_key"
 ### First Run
 
 1. Push all files to GitHub
-2. Go to Actions → **Manual Retrain** → Run workflow (force refresh: true)
-3. Wait ~10 minutes for first full pipeline run
-4. Verify GitLab folders populate with `etf_data.csv`, `model_bank.pkl`, `signals.csv`
+2. Go to Actions → **Manual Retrain** → Run workflow (`force_refresh=true`, `run_wfcv=true`)
+3. Wait ~35 min for retrain, then ~3 hours for walk-forward job to complete
+4. Verify GitLab populates with `etf_data.csv`, `momentum_ranker.pkl`, `mom_pred_history.csv`, `wf_mom_pred_history.csv`, `signals.csv`
 5. Connect repo to Streamlit Community Cloud and deploy
 
-### Local Testing (optional)
+### Local Testing
 
 ```bash
 pip install -r requirements.txt
 # Create .env with your secrets (never commit this file)
 python train.py --local --force-refresh   # skips GitLab write
+python train.py --wfcv-only               # run WF only (writes to GitLab)
 ```
 
 ---
 
 ## Disclaimer
 
-This project is for research and educational purposes only. It is not investment advice. Past backtest performance does not guarantee future results. TBT is a leveraged inverse ETF with structural decay and is unsuitable for long holding periods. Always consult a qualified financial advisor before making investment decisions.
+This project is for research and educational purposes only. It is not investment advice. Past backtest performance does not guarantee future results. Always consult a qualified financial advisor before making investment decisions.
 
 ---
 
