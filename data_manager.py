@@ -644,6 +644,14 @@ def load_momentum_predictions_from_gitlab() -> Optional[pd.DataFrame]:
     return load_predictions_from_gitlab("data/mom_pred_history.csv")
 
 
+def load_wf_momentum_predictions_from_gitlab() -> Optional[pd.DataFrame]:
+    return load_predictions_from_gitlab("data/wf_mom_pred_history.csv")
+
+
+def load_wf_ensemble_predictions_from_gitlab() -> Optional[pd.DataFrame]:
+    return load_predictions_from_gitlab("data/wf_pred_history.csv")
+
+
 def load_feature_list_from_gitlab() -> Optional[list]:
     content = gitlab_read_file("meta/feature_list.json")
     if content is None:
