@@ -1,18 +1,10 @@
 """
-models.py — P2-ETF-REGIME-PREDICTOR
-=====================================
-LightGBM LambdaRank + Logistic Regression ensemble for ETF rotation.
+models.py — Layer 2 Momentum Ranker for P2 ETF Regime Predictor.
 
-Architecture:
-  - LambdaRank: directly optimises ranking of ETFs by forward return
-    (which ETF will rank #1 over the next N days?)
-  - Per-regime models trained on optimal horizon per (ETF, regime)
-  - Optimal horizon (5/10/15/20 days) selected by Spearman rank
-    correlation during training — model finds its own best horizon
-  - Logistic Regression (L1) binary baseline per ETF for disagreement check
-  - Ensemble: LambdaRank score for ranking + LogReg for conviction
+Momentum-based ETF ranking using composite RoC + OBV + Breakout score.
+No ML — fully rules-based, transparent, and interpretable.
 
-Author: P2SAMAPA
+Walk-forward cross-validation support via walk_forward_cv().
 """
 
 import logging
@@ -758,7 +750,7 @@ def walk_forward_cv(
     ----------
     df           : full feature DataFrame with Regime column
     fwd_df       : forward return targets DataFrame
-    mode         : "momentum" (Option B) or "ensemble" (Option A)
+    mode         : always "momentum" — ensemble mode removed
     train_years  : years of training data per fold
     test_years   : years of OOS test data per fold
     feature_cols : feature columns for ensemble mode
@@ -798,30 +790,9 @@ def walk_forward_cv(
                  f"({len(df_train)} train, {len(df_test)} test days)")
 
         try:
-            if mode == "momentum":
-                model = MomentumRanker()
-                model.fit(df_train)
-                preds = model.predict_all_history(df_test)
-
-            else:  # ensemble
-                # Clean features
-                df_tr_c = df_train.copy()
-                df_tr_c[feature_cols] = (
-                    df_tr_c[feature_cols]
-                    .fillna(df_tr_c[feature_cols].median())
-                    .fillna(0.0)
-                )
-                bank = RegimeModelBank()
-                bank.fit(df_tr_c, fwd_train, feature_cols=feature_cols,
-                         val_pct=0.15)
-
-                df_te_c = df_test.copy()
-                df_te_c[feature_cols] = (
-                    df_te_c[feature_cols]
-                    .fillna(df_tr_c[feature_cols].median())
-                    .fillna(0.0)
-                )
-                preds = bank.predict_all_history(df_te_c)
+            model = MomentumRanker()
+            model.fit(df_train)
+            preds = model.predict_all_history(df_test)
 
             all_preds.append(preds)
             log.info(f"  Fold {fold} complete: {len(preds)} predictions")
