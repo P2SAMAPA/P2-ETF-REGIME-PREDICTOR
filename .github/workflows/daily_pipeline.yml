@@ -21,7 +21,11 @@ jobs:
   train:
     runs-on: ubuntu-latest
     timeout-minutes: 90
-    if: github.event_name == 'workflow_dispatch' || github.event.schedule == '30 11 * * 1-5'
+    # FIX: avoid fragile cron string comparison — run on any schedule trigger or manual dispatch
+    # The monthly WF job (refresh_walkforward) is separated by its own cron, so no conflict
+    if: >
+      github.event_name == 'workflow_dispatch' ||
+      (github.event_name == 'schedule' && github.event.schedule == '30 11 * * 1-5')
 
     env:
       GITLAB_API_TOKEN: ${{ secrets.GITLAB_API_TOKEN }}
@@ -60,7 +64,9 @@ jobs:
   refresh_walkforward:
     runs-on: ubuntu-latest
     timeout-minutes: 180
-    if: github.event.schedule == '0 12 1 * *'
+    # FIX: same pattern — use both event_name and schedule checks
+    if: >
+      github.event_name == 'schedule' && github.event.schedule == '0 12 1 * *'
 
     env:
       GITLAB_API_TOKEN: ${{ secrets.GITLAB_API_TOKEN }}
