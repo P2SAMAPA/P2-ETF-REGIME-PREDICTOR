@@ -193,8 +193,9 @@ if st.session_state.refresh_status:
     else:
         st.error(msg)
 
+
 # ── Sweep helpers ─────────────────────────────────────────────────────────────
-import json, re
+import json as _json_sw, re as _re_sw
 
 SWEEP_YEARS = [2008, 2013, 2015, 2017, 2019, 2021]
 
@@ -202,7 +203,7 @@ def _today_est():
     from datetime import datetime as _dt, timezone as _tz, timedelta as _td
     return (_dt.now(_tz.utc) - _td(hours=5)).date()
 
-def _trigger_sweep(years: list, gh_token: str, gh_repo: str) -> bool:
+def _trigger_sweep(years, gh_token, gh_repo):
     import requests as _req
     sweep_str = ",".join(str(y) for y in years)
     resp = _req.post(
@@ -215,16 +216,15 @@ def _trigger_sweep(years: list, gh_token: str, gh_repo: str) -> bool:
     return resp.status_code == 204
 
 @st.cache_data(ttl=120)
-def _load_sweep_cache(date_str: str) -> dict:
-    """Load today's date-stamped sweep JSONs from GitLab."""
+def _load_sweep_cache(date_str):
     cache = {}
     try:
+        import requests as _req
         gl_token = os.environ.get("GITLAB_API_TOKEN", "")
         gl_url   = os.environ.get("GITLAB_REPO_URL", "")
         if not gl_token or not gl_url:
             return cache
-        import requests as _req
-        match   = re.search(r"projects/([^/?]+)", gl_url)
+        match   = _re_sw.search(r"projects/([^/?]+)", gl_url)
         proj    = match.group(1) if match else None
         gl_base = gl_url.split("/api/")[0] if "/api/" in gl_url else "https://gitlab.com"
         if not proj:
@@ -233,39 +233,38 @@ def _load_sweep_cache(date_str: str) -> dict:
         for yr in SWEEP_YEARS:
             fname = f"data%2Fsweep_{yr}_{date_str}.json"
             r = _req.get(
-                f"{gl_base}/api/v4/projects/{proj}/repository/files/{fname}/raw"
-                f"?ref=main",
+                f"{gl_base}/api/v4/projects/{proj}/repository/files/{fname}/raw?ref=main",
                 headers=headers, timeout=10,
             )
             if r.status_code == 200:
-                cache[yr] = r.json()
+                try:
+                    cache[yr] = r.json()
+                except Exception:
+                    pass
     except Exception:
         pass
     return cache
 
 @st.cache_data(ttl=120)
-def _load_sweep_any() -> tuple:
-    """Load most recent sweep files regardless of date."""
+def _load_sweep_any():
     found, best_date = {}, None
     try:
         import requests as _req
+        from datetime import datetime as _dt2
         gl_token = os.environ.get("GITLAB_API_TOKEN", "")
         gl_url   = os.environ.get("GITLAB_REPO_URL", "")
-        match    = re.search(r"projects/([^/?]+)", gl_url)
+        match    = _re_sw.search(r"projects/([^/?]+)", gl_url)
         proj     = match.group(1) if match else None
         gl_base  = gl_url.split("/api/")[0] if "/api/" in gl_url else "https://gitlab.com"
         headers  = {"PRIVATE-TOKEN": gl_token}
-        # List files in data/ folder
         r = _req.get(
-            f"{gl_base}/api/v4/projects/{proj}/repository/tree"
-            f"?path=data&per_page=100&ref=main",
+            f"{gl_base}/api/v4/projects/{proj}/repository/tree?path=data&per_page=100&ref=main",
             headers=headers, timeout=10,
         )
         if r.status_code != 200:
             return found, best_date
-        from datetime import datetime as _dt2
         for item in r.json():
-            name = item.get("name", "")
+            name = item.get("name","")
             if name.startswith("sweep_") and name.endswith(".json"):
                 parts = name.replace(".json","").split("_")
                 if len(parts) == 3:
@@ -280,41 +279,42 @@ def _load_sweep_any() -> tuple:
             for yr in SWEEP_YEARS:
                 fname = f"data%2Fsweep_{yr}_{date_str}.json"
                 r2 = _req.get(
-                    f"{gl_base}/api/v4/projects/{proj}/repository/files/{fname}/raw"
-                    f"?ref=main",
+                    f"{gl_base}/api/v4/projects/{proj}/repository/files/{fname}/raw?ref=main",
                     headers=headers, timeout=10,
                 )
                 if r2.status_code == 200:
-                    found[yr] = r2.json()
+                    try:
+                        found[yr] = r2.json()
+                    except Exception:
+                        pass
     except Exception:
         pass
     return found, best_date
 
-def _compute_consensus(sweep_data: dict) -> dict:
-    """40% Return · 20% Z · 20% Sharpe · 20% (–MaxDD), min-max normalised."""
+def _compute_consensus(sweep_data):
     import numpy as _np
     rows = []
     for yr, sig in sweep_data.items():
         rows.append({
             "year":       yr,
-            "signal":     sig.get("signal", "?"),
+            "signal":     sig.get("signal","?"),
             "ann_return": float(sig.get("ann_return", 0.0)),
             "z_score":    float(sig.get("z_score", 0.0)),
             "sharpe":     float(sig.get("sharpe", 0.0)),
             "max_dd":     float(sig.get("max_dd", 0.0)),
-            "conviction": sig.get("conviction", "?"),
-            "regime":     sig.get("regime", "?"),
+            "conviction": sig.get("conviction","?"),
+            "regime":     sig.get("regime","?"),
         })
     if not rows:
         return {}
-    df = pd.DataFrame(rows)
+    df_c = pd.DataFrame(rows)
     def _mm(s):
         mn, mx = s.min(), s.max()
         return (s - mn) / (mx - mn + 1e-9)
-    df["wtd"] = (0.40*_mm(df["ann_return"]) + 0.20*_mm(df["z_score"]) +
-                 0.20*_mm(df["sharpe"])      + 0.20*_mm(-df["max_dd"]))
+    df_c["wtd"] = (0.40*_mm(df_c["ann_return"]) + 0.20*_mm(df_c["z_score"]) +
+                   0.20*_mm(df_c["sharpe"])      + 0.20*_mm(-df_c["max_dd"]))
     etf_agg = {}
-    for _, row in df.iterrows():
+    for _, row in df_c.iterrows():
         e = row["signal"]
         etf_agg.setdefault(e, {"years":[], "scores":[], "returns":[],
                                 "zs":[], "sharpes":[], "dds":[]})
@@ -340,7 +340,7 @@ def _compute_consensus(sweep_data: dict) -> dict:
         }
     winner_etf = max(summary, key=lambda e: summary[e]["cum_score"])
     return {"winner": winner_etf, "etf_summary": summary,
-            "per_year": df.to_dict("records"), "n_years": len(rows)}
+            "per_year": df_c.to_dict("records"), "n_years": len(rows)}
 
 ETF_COLORS_SW = {
     "TLT":"#4e79a7","VNQ":"#76b7b2","SLV":"#edc948","GLD":"#b07aa1",
@@ -349,6 +349,207 @@ ETF_COLORS_SW = {
 
 # ── Tabs ──────────────────────────────────────────────────────────────────────
 tab1, tab2 = st.tabs(["📊 Single-Year Results", "🔄 Multi-Year Consensus Sweep"])
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# TAB 2 — Multi-Year Consensus Sweep (rendered BEFORE tab1 to avoid st.stop())
+# ═══════════════════════════════════════════════════════════════════════════════
+with tab2:
+    st.subheader("🔄 Multi-Year Consensus Sweep")
+    st.markdown(
+        "Runs the regime-aware rotation model across **6 start years** and aggregates "
+        "signals into a weighted consensus.  \n"
+        f"**Sweep years:** {', '.join(str(y) for y in SWEEP_YEARS)}  &nbsp;·&nbsp;  "
+        "**Score:** 40% Return · 20% Z · 20% Sharpe · 20% (–MaxDD)  \n"
+        "Auto-runs daily at **8pm EST**. Results are date-stamped — stale cache never shown."
+    )
+
+    today_sw  = _today_est()
+    today_str = today_sw.strftime("%Y%m%d")
+
+    today_cache           = _load_sweep_cache(today_str)
+    prev_cache, prev_date = _load_sweep_any()
+    if prev_date == today_sw:
+        prev_cache, prev_date = {}, None
+
+    sweep_complete = len(today_cache) == len(SWEEP_YEARS)
+    display_cache  = today_cache if today_cache else prev_cache
+    display_date   = today_sw    if today_cache else prev_date
+
+    if display_cache and display_date and display_date < today_sw:
+        st.warning(f"⚠️ Showing results from **{display_date}**. "
+                   "Today's sweep hasn't run yet — auto-triggers at 8pm EST.", icon="📅")
+
+    # Status grid
+    _cols = st.columns(len(SWEEP_YEARS))
+    for _i, _yr in enumerate(SWEEP_YEARS):
+        with _cols[_i]:
+            if _yr in today_cache:
+                st.success(f"**{_yr}**\n✅ {today_cache[_yr].get('signal','?')}")
+            elif _yr in prev_cache:
+                st.warning(f"**{_yr}**\n📅 {prev_cache[_yr].get('signal','?')}")
+            else:
+                st.error(f"**{_yr}**\n⏳ Not run")
+    st.caption("✅ today · 📅 previous day · ⏳ not run")
+    st.divider()
+
+    # Run button
+    _missing      = [y for y in SWEEP_YEARS if y not in today_cache]
+    _force_rerun  = st.checkbox("🔄 Force re-run all years", value=False,
+                                help="Re-trains even if today\'s results already exist")
+    _trigger_yrs  = SWEEP_YEARS if _force_rerun else _missing
+
+    _cb, _ci = st.columns([1, 3])
+    with _cb:
+        _sweep_btn = st.button("🚀 Run Consensus Sweep", type="primary",
+                               use_container_width=True,
+                               disabled=(sweep_complete and not _force_rerun))
+    with _ci:
+        if sweep_complete and not _force_rerun:
+            st.success(f"✅ Today\'s sweep complete ({today_sw}) — all {len(SWEEP_YEARS)} years ready")
+        else:
+            st.info(f"**{len(today_cache)}/{len(SWEEP_YEARS)}** years done today.  \n"
+                    f"Will trigger **{len(_trigger_yrs)}** jobs: {', '.join(str(y) for y in _trigger_yrs)}")
+
+    if _sweep_btn and _trigger_yrs:
+        try:
+            _gh_token = os.environ.get("GITHUB_PAT", "")
+            _gh_repo  = os.environ.get("GITHUB_REPO", "P2SAMAPA/P2-ETF-REGIME-PREDICTOR")
+            if not _gh_token:
+                raise ValueError("GITHUB_PAT secret not set")
+            _ok = _trigger_sweep(_trigger_yrs, _gh_token, _gh_repo)
+            if _ok:
+                st.success(f"✅ Triggered {len(_trigger_yrs)} jobs: "
+                           f"{', '.join(str(y) for y in _trigger_yrs)}. ~10-15 mins each.")
+            else:
+                st.error("❌ GitHub API returned non-204. Check GITHUB_PAT permissions.")
+        except Exception as _ex:
+            st.error(f"❌ Trigger failed: {_ex}")
+
+    if not display_cache:
+        st.info("👆 No sweep results yet. Click **🚀 Run Consensus Sweep** or wait for 8pm EST.")
+    else:
+        _cons = _compute_consensus(display_cache)
+        if not _cons:
+            st.warning("Could not compute consensus.")
+        else:
+            _w     = _cons["winner"]
+            _wi    = _cons["etf_summary"][_w]
+            _wc    = ETF_COLORS_SW.get(_w, "#0066cc")
+            _sp    = _wi["score_share"] * 100
+            _sp    = _sp if _sp == _sp else 0.0
+            _slab  = "⚠️ Split Signal" if _wi["score_share"] < 0.40 else "✅ Clear Consensus"
+
+            st.markdown(f"""
+            <div style="background:linear-gradient(135deg,#1a1a2e,#16213e);
+                        border:2px solid {_wc};border-radius:16px;
+                        padding:32px;text-align:center;margin:16px 0;">
+              <div style="font-size:11px;letter-spacing:3px;color:#aaa;margin-bottom:8px;">
+                WEIGHTED CONSENSUS · REGIME-PREDICTOR · {len(display_cache)} START YEARS · {display_date}
+              </div>
+              <div style="font-size:72px;font-weight:900;color:{_wc};
+                          text-shadow:0 0 30px {_wc}88;">{_w}</div>
+              <div style="font-size:14px;color:#ccc;margin-top:8px;">
+                {_slab} · Score share {_sp:.0f}% · {_wi["n_years"]}/{len(SWEEP_YEARS)} years
+              </div>
+              <div style="display:flex;justify-content:center;gap:32px;margin-top:20px;flex-wrap:wrap;">
+                <div style="text-align:center;">
+                  <div style="font-size:11px;color:#aaa;">Avg Return</div>
+                  <div style="font-size:22px;font-weight:700;color:{'#00b894' if _wi['avg_return']>0 else '#d63031'};">
+                    {_wi["avg_return"]*100:.1f}%</div></div>
+                <div style="text-align:center;">
+                  <div style="font-size:11px;color:#aaa;">Avg Z</div>
+                  <div style="font-size:22px;font-weight:700;color:#74b9ff;">{_wi["avg_z"]:.2f}σ</div></div>
+                <div style="text-align:center;">
+                  <div style="font-size:11px;color:#aaa;">Avg Sharpe</div>
+                  <div style="font-size:22px;font-weight:700;color:#a29bfe;">{_wi["avg_sharpe"]:.2f}</div></div>
+                <div style="text-align:center;">
+                  <div style="font-size:11px;color:#aaa;">Avg MaxDD</div>
+                  <div style="font-size:22px;font-weight:700;color:#fd79a8;">{_wi["avg_max_dd"]*100:.1f}%</div></div>
+              </div>
+            </div>
+            """, unsafe_allow_html=True)
+
+            _others = sorted([(e,v) for e,v in _cons["etf_summary"].items() if e != _w],
+                             key=lambda x: -x[1]["cum_score"])
+            if _others:
+                _parts = [f'<span style="color:{ETF_COLORS_SW.get(e,"#888")};font-weight:600;">{e}</span> '
+                          f'<span style="color:#aaa;">({v["cum_score"]:.2f})</span>' for e,v in _others]
+                st.markdown('<div style="text-align:center;font-size:13px;margin-bottom:12px;">Also ranked: '
+                            + ' &nbsp;|&nbsp; '.join(_parts) + '</div>', unsafe_allow_html=True)
+            st.divider()
+
+            import plotly.graph_objects as _go
+            _c1, _c2 = st.columns(2)
+            with _c1:
+                st.markdown("**Weighted Score per ETF**")
+                _es   = _cons["etf_summary"]
+                _setf = sorted(_es.keys(), key=lambda e: -_es[e]["cum_score"])
+                _fb   = _go.Figure(_go.Bar(
+                    x=_setf,
+                    y=[_es[e]["cum_score"] for e in _setf],
+                    marker_color=[ETF_COLORS_SW.get(e,"#888") for e in _setf],
+                    text=[f"{_es[e]['n_years']}yr · {_es[e]['score_share']*100:.0f}%"
+                          for e in _setf],
+                    textposition="outside",
+                ))
+                _fb.update_layout(template="plotly_dark", height=360,
+                                  yaxis_title="Cumulative Score", showlegend=False,
+                                  margin=dict(t=20,b=20))
+                st.plotly_chart(_fb, use_container_width=True)
+
+            with _c2:
+                st.markdown("**Z-Score Conviction by Start Year**")
+                _fs = _go.Figure()
+                for _row in _cons["per_year"]:
+                    _etf = _row["signal"]
+                    _col = ETF_COLORS_SW.get(_etf, "#888")
+                    _fs.add_trace(_go.Scatter(
+                        x=[_row["year"]], y=[_row["z_score"]],
+                        mode="markers+text",
+                        marker=dict(size=18, color=_col, line=dict(color="white",width=1)),
+                        text=[_etf], textposition="top center", showlegend=False,
+                        hovertemplate=(f"<b>{_etf}</b><br>Year: {_row['year']}<br>"
+                                       f"Z: {_row['z_score']:.2f}σ<br>"
+                                       f"Return: {_row['ann_return']*100:.1f}%<extra></extra>")
+                    ))
+                _fs.add_hline(y=0, line_dash="dot", line_color="rgba(255,255,255,0.3)")
+                _fs.update_layout(template="plotly_dark", height=360,
+                                  xaxis_title="Start Year", yaxis_title="Z-Score (σ)",
+                                  margin=dict(t=20,b=20))
+                st.plotly_chart(_fs, use_container_width=True)
+
+            st.subheader("📋 Full Per-Year Breakdown")
+            st.caption(f"40% Ann. Return + 20% Z + 20% Sharpe + 20% (–MaxDD), "
+                       f"min-max normalised · Results: {display_date}")
+            _tbl = []
+            for _row in sorted(_cons["per_year"], key=lambda r: r["year"]):
+                _tbl.append({
+                    "Start Year":   _row["year"],
+                    "Signal":       _row["signal"],
+                    "Regime":       _row.get("regime","?"),
+                    "Conviction":   _row.get("conviction","?"),
+                    "Wtd Score":    round(_row["wtd"], 3),
+                    "Z-Score":      f"{_row['z_score']:.2f}σ",
+                    "Ann. Return":  f"{_row['ann_return']*100:.2f}%",
+                    "Sharpe":       f"{_row['sharpe']:.2f}",
+                    "Max Drawdown": f"{_row['max_dd']*100:.2f}%",
+                    "Date": "✅ Today" if _row["year"] in today_cache else f"📅 {display_date}",
+                })
+            _tdf = pd.DataFrame(_tbl)
+            def _ss(val):
+                c = ETF_COLORS_SW.get(val,"#888")
+                return f"background-color:{c}22;color:{c};font-weight:700;"
+            def _sr(val):
+                try:
+                    v = float(str(val).replace("%",""))
+                    return "color:#00b894;font-weight:600" if v>0 else "color:#d63031;font-weight:600"
+                except Exception: return ""
+            st.dataframe(_tdf.style.applymap(_ss,subset=["Signal"])
+                                   .applymap(_sr,subset=["Ann. Return"])
+                                   .set_properties(**{"text-align":"center"})
+                                   .hide(axis="index"),
+                         use_container_width=True, height=280)
 
 with tab1:
     if not run_btn:
@@ -883,245 +1084,3 @@ with tab1:
 
     </div>
     """, unsafe_allow_html=True)
-
-
-# ═══════════════════════════════════════════════════════════════════════════════
-# TAB 2 — Multi-Year Consensus Sweep
-# ═══════════════════════════════════════════════════════════════════════════════
-with tab2:
-    st.subheader("🔄 Multi-Year Consensus Sweep")
-    st.markdown(
-        "Runs the regime-aware rotation model across **6 start years** and aggregates "
-        "signals into a weighted consensus.  \n"
-        f"**Sweep years:** {', '.join(str(y) for y in SWEEP_YEARS)}  &nbsp;·&nbsp;  "
-        "**Score:** 40% Return · 20% Z · 20% Sharpe · 20% (–MaxDD)  \n"
-        "Auto-runs daily at **8pm EST**. Results are date-stamped — stale cache never shown."
-    )
-
-    today_sw  = _today_est()
-    today_str = today_sw.strftime("%Y%m%d")
-
-    today_cache             = _load_sweep_cache(today_str)
-    prev_cache, prev_date   = _load_sweep_any()
-    if prev_date == today_sw:
-        prev_cache, prev_date = {}, None
-
-    sweep_complete = len(today_cache) == len(SWEEP_YEARS)
-    display_cache  = today_cache if today_cache else prev_cache
-    display_date   = today_sw    if today_cache else prev_date
-
-    # ── Stale banner ─────────────────────────────────────────────────────────
-    if display_cache and display_date and display_date < today_sw:
-        st.warning(
-            f"⚠️ Showing results from **{display_date}**. "
-            "Today's sweep hasn't run yet — auto-triggers at 8pm EST.",
-            icon="📅"
-        )
-
-    # ── Year status grid ──────────────────────────────────────────────────────
-    cols = st.columns(len(SWEEP_YEARS))
-    for i, yr in enumerate(SWEEP_YEARS):
-        with cols[i]:
-            if yr in today_cache:
-                sig = today_cache[yr].get("signal","?")
-                st.success(f"**{yr}**\n✅ {sig}")
-            elif yr in prev_cache:
-                sig = prev_cache[yr].get("signal","?")
-                st.warning(f"**{yr}**\n📅 {sig}")
-            else:
-                st.error(f"**{yr}**\n⏳ Not run")
-    st.caption("✅ today · 📅 previous day · ⏳ not run")
-    st.divider()
-
-    # ── Run button ────────────────────────────────────────────────────────────
-    missing_today = [yr for yr in SWEEP_YEARS if yr not in today_cache]
-    force_rerun   = st.checkbox("🔄 Force re-run all years", value=False,
-                                help="Re-trains even if today's results already exist")
-    trigger_years = SWEEP_YEARS if force_rerun else missing_today
-
-    col_btn, col_info = st.columns([1, 3])
-    with col_btn:
-        sweep_btn = st.button(
-            "🚀 Run Consensus Sweep", type="primary",
-            use_container_width=True,
-            disabled=(sweep_complete and not force_rerun),
-            help="Triggers parallel GitHub Actions sweep jobs"
-        )
-    with col_info:
-        if sweep_complete and not force_rerun:
-            st.success(f"✅ Today's sweep complete ({today_sw}) — all {len(SWEEP_YEARS)} years ready")
-        else:
-            n_done = len(today_cache)
-            st.info(
-                f"**{n_done}/{len(SWEEP_YEARS)}** years done today.  \n"
-                f"Will trigger **{len(trigger_years)}** parallel jobs: "
-                f"{', '.join(str(y) for y in trigger_years)}"
-            )
-
-    if sweep_btn and trigger_years:
-        try:
-            gh_token = os.environ.get("GITHUB_PAT", "")
-            gh_repo  = os.environ.get("GITHUB_REPO", "P2SAMAPA/P2-ETF-REGIME-PREDICTOR")
-            if not gh_token:
-                raise ValueError("GITHUB_PAT secret not set in Streamlit")
-            ok = _trigger_sweep(trigger_years, gh_token, gh_repo)
-            if ok:
-                st.success(
-                    f"✅ Triggered {len(trigger_years)} parallel sweep jobs: "
-                    f"{', '.join(str(y) for y in trigger_years)}. "
-                    "Each takes ~10-15 mins. Refresh the page when done."
-                )
-            else:
-                st.error("❌ GitHub API returned non-204. Check GITHUB_PAT and repo permissions.")
-        except Exception as e:
-            st.error(f"❌ Trigger failed: {e}")
-
-    if not display_cache:
-        st.info("👆 No sweep results yet. Click **🚀 Run Consensus Sweep** to start.")
-        st.stop()
-
-    consensus = _compute_consensus(display_cache)
-    if not consensus:
-        st.warning("Could not compute consensus from available data.")
-        st.stop()
-
-    winner_sw  = consensus["winner"]
-    w_info     = consensus["etf_summary"][winner_sw]
-    win_color  = ETF_COLORS_SW.get(winner_sw, "#0066cc")
-    score_pct  = w_info["score_share"] * 100
-    score_pct  = score_pct if score_pct == score_pct else 0.0  # guard nan
-    split_sig  = w_info["score_share"] < 0.40
-    sig_label  = "⚠️ Split Signal" if split_sig else "✅ Clear Consensus"
-
-    # ── Winner banner ─────────────────────────────────────────────────────────
-    st.markdown(f"""
-    <div style="background:linear-gradient(135deg,#1a1a2e,#16213e);
-                border:2px solid {win_color};border-radius:16px;
-                padding:32px;text-align:center;margin:16px 0;">
-      <div style="font-size:11px;letter-spacing:3px;color:#aaa;margin-bottom:8px;">
-        WEIGHTED CONSENSUS · REGIME-PREDICTOR · {len(display_cache)} START YEARS · {display_date}
-      </div>
-      <div style="font-size:72px;font-weight:900;color:{win_color};
-                  text-shadow:0 0 30px {win_color}88;">
-        {winner_sw}
-      </div>
-      <div style="font-size:14px;color:#ccc;margin-top:8px;">
-        {sig_label} · Score share {score_pct:.0f}% · {w_info['n_years']}/{len(SWEEP_YEARS)} years
-      </div>
-      <div style="display:flex;justify-content:center;gap:32px;margin-top:20px;flex-wrap:wrap;">
-        <div style="text-align:center;">
-          <div style="font-size:11px;color:#aaa;">Avg Return</div>
-          <div style="font-size:22px;font-weight:700;color:{'#00b894' if w_info['avg_return']>0 else '#d63031'};">
-            {w_info['avg_return']*100:.1f}%</div>
-        </div>
-        <div style="text-align:center;">
-          <div style="font-size:11px;color:#aaa;">Avg Z</div>
-          <div style="font-size:22px;font-weight:700;color:#74b9ff;">{w_info['avg_z']:.2f}σ</div>
-        </div>
-        <div style="text-align:center;">
-          <div style="font-size:11px;color:#aaa;">Avg Sharpe</div>
-          <div style="font-size:22px;font-weight:700;color:#a29bfe;">{w_info['avg_sharpe']:.2f}</div>
-        </div>
-        <div style="text-align:center;">
-          <div style="font-size:11px;color:#aaa;">Avg MaxDD</div>
-          <div style="font-size:22px;font-weight:700;color:#fd79a8;">{w_info['avg_max_dd']*100:.1f}%</div>
-        </div>
-      </div>
-    </div>
-    """, unsafe_allow_html=True)
-
-    # Also-ranked
-    others = sorted([(e,v) for e,v in consensus["etf_summary"].items() if e != winner_sw],
-                    key=lambda x: -x[1]["cum_score"])
-    if others:
-        parts = [f'<span style="color:{ETF_COLORS_SW.get(e,"#888")};font-weight:600;">{e}</span> '
-                 f'<span style="color:#aaa;">({v["cum_score"]:.2f})</span>' for e,v in others]
-        st.markdown('<div style="text-align:center;font-size:13px;margin-bottom:12px;">Also ranked: '
-                    + ' &nbsp;|&nbsp; '.join(parts) + '</div>', unsafe_allow_html=True)
-    st.divider()
-
-    # ── Charts ────────────────────────────────────────────────────────────────
-    import plotly.graph_objects as go
-    c1, c2 = st.columns(2)
-
-    with c1:
-        st.markdown("**Weighted Score per ETF**")
-        es = consensus["etf_summary"]
-        sorted_etfs = sorted(es.keys(), key=lambda e: -es[e]["cum_score"])
-        fig_bar = go.Figure(go.Bar(
-            x=sorted_etfs,
-            y=[es[e]["cum_score"] for e in sorted_etfs],
-            marker_color=[ETF_COLORS_SW.get(e,"#888") for e in sorted_etfs],
-            text=[f"{es[e]['n_years']}yr · {es[e]['score_share']*100:.0f}%"
-                  for e in sorted_etfs],
-            textposition="outside",
-        ))
-        fig_bar.update_layout(template="plotly_dark", height=360,
-                              yaxis_title="Cumulative Score", showlegend=False,
-                              margin=dict(t=20,b=20))
-        st.plotly_chart(fig_bar, use_container_width=True)
-
-    with c2:
-        st.markdown("**Z-Score Conviction by Start Year**")
-        per_year = consensus["per_year"]
-        fig_sc = go.Figure()
-        for row in per_year:
-            etf = row["signal"]
-            col = ETF_COLORS_SW.get(etf, "#888")
-            fig_sc.add_trace(go.Scatter(
-                x=[row["year"]], y=[row["z_score"]],
-                mode="markers+text",
-                marker=dict(size=18, color=col, line=dict(color="white",width=1)),
-                text=[etf], textposition="top center",
-                name=etf, showlegend=False,
-                hovertemplate=(f"<b>{etf}</b><br>Year: {row['year']}<br>"
-                               f"Z: {row['z_score']:.2f}σ<br>"
-                               f"Return: {row['ann_return']*100:.1f}%<extra></extra>")
-            ))
-        fig_sc.add_hline(y=0, line_dash="dot", line_color="rgba(255,255,255,0.3)")
-        fig_sc.update_layout(template="plotly_dark", height=360,
-                             xaxis_title="Start Year", yaxis_title="Z-Score (σ)",
-                             margin=dict(t=20,b=20))
-        st.plotly_chart(fig_sc, use_container_width=True)
-
-    # ── Per-year breakdown table ──────────────────────────────────────────────
-    st.subheader("📋 Full Per-Year Breakdown")
-    st.caption(
-        f"40% Ann. Return + 20% Z-Score + 20% Sharpe + 20% (–MaxDD), "
-        f"min-max normalised · Results: {display_date}"
-    )
-    tbl_rows = []
-    for row in sorted(per_year, key=lambda r: r["year"]):
-        tbl_rows.append({
-            "Start Year":   row["year"],
-            "Signal":       row["signal"],
-            "Regime":       row.get("regime","?"),
-            "Conviction":   row.get("conviction","?"),
-            "Wtd Score":    round(row["wtd"], 3),
-            "Z-Score":      f"{row['z_score']:.2f}σ",
-            "Ann. Return":  f"{row['ann_return']*100:.2f}%",
-            "Sharpe":       f"{row['sharpe']:.2f}",
-            "Max Drawdown": f"{row['max_dd']*100:.2f}%",
-            "Date":         "✅ Today" if row["year"] in today_cache else f"📅 {display_date}",
-        })
-
-    tbl_df = pd.DataFrame(tbl_rows)
-
-    def _style_sig_sw(val):
-        c = ETF_COLORS_SW.get(val, "#888")
-        return f"background-color:{c}22;color:{c};font-weight:700;"
-
-    def _style_ret_sw(val):
-        try:
-            v = float(str(val).replace("%",""))
-            return "color:#00b894;font-weight:600" if v > 0 else "color:#d63031;font-weight:600"
-        except Exception:
-            return ""
-
-    st.dataframe(
-        tbl_df.style.applymap(_style_sig_sw, subset=["Signal"])
-                    .applymap(_style_ret_sw, subset=["Ann. Return"])
-                    .set_properties(**{"text-align":"center","font-size":"14px"})
-                    .hide(axis="index"),
-        use_container_width=True, height=280
-    )
