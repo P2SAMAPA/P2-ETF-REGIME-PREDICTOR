@@ -195,7 +195,7 @@ if st.session_state.refresh_status:
 
 
 # ── Sweep helpers ─────────────────────────────────────────────────────────────
-import json as _json_sw, re as _re_sw
+import json as _json_sw, re as _re_sw, os as _os_sw
 
 SWEEP_YEARS = [2008, 2013, 2015, 2017, 2019, 2021]
 
@@ -220,8 +220,8 @@ def _load_sweep_cache(date_str):
     cache = {}
     try:
         import requests as _req
-        gl_token = os.environ.get("GITLAB_API_TOKEN", "")
-        gl_url   = os.environ.get("GITLAB_REPO_URL", "")
+        gl_token = _os_sw.environ.get("GITLAB_API_TOKEN", "")
+        gl_url   = _os_sw.environ.get("GITLAB_REPO_URL", "")
         if not gl_token or not gl_url:
             return cache
         match   = _re_sw.search(r"projects/([^/?]+)", gl_url)
@@ -251,8 +251,8 @@ def _load_sweep_any():
     try:
         import requests as _req
         from datetime import datetime as _dt2
-        gl_token = os.environ.get("GITLAB_API_TOKEN", "")
-        gl_url   = os.environ.get("GITLAB_REPO_URL", "")
+        gl_token = _os_sw.environ.get("GITLAB_API_TOKEN", "")
+        gl_url   = _os_sw.environ.get("GITLAB_REPO_URL", "")
         match    = _re_sw.search(r"projects/([^/?]+)", gl_url)
         proj     = match.group(1) if match else None
         gl_base  = gl_url.split("/api/")[0] if "/api/" in gl_url else "https://gitlab.com"
@@ -413,8 +413,9 @@ with tab2:
 
     if _sweep_btn and _trigger_yrs:
         try:
-            _gh_token = os.environ.get("GITHUB_PAT", "")
-            _gh_repo  = os.environ.get("GITHUB_REPO", "P2SAMAPA/P2-ETF-REGIME-PREDICTOR")
+            import os as _os_sw
+            _gh_token = _os_sw.environ.get("GITHUB_PAT", "")
+            _gh_repo  = _os_sw.environ.get("GITHUB_REPO", "P2SAMAPA/P2-ETF-REGIME-PREDICTOR")
             if not _gh_token:
                 raise ValueError("GITHUB_PAT secret not set")
             _ok = _trigger_sweep(_trigger_yrs, _gh_token, _gh_repo)
