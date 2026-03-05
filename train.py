@@ -58,7 +58,8 @@ TRAIN_PCT     = 0.70
 
 def run_pipeline(force_refresh: bool = False,
                  skip_gitlab_write: bool = False,
-                 run_wfcv: bool = False) -> dict:
+                 run_wfcv: bool = False,
+                 sweep_mode: bool = False) -> dict:
     """
     Full daily training pipeline.
 
@@ -79,7 +80,18 @@ def run_pipeline(force_refresh: bool = False,
     # ── Step 1: Load / build dataset ──────────────────────────────────────────
     log.info("Step 1: Loading dataset...")
 
-    if force_refresh:
+    if sweep_mode:
+        # Sweep jobs: always load shared dataset from GitLab — never re-download
+        # All 6 parallel jobs share the same underlying data, only start_year differs
+        log.info("Sweep mode — loading shared dataset from GitLab (no yfinance calls)")
+        existing = load_dataset_from_gitlab()
+        if existing is not None:
+            log.info(f"Loaded from GitLab: {len(existing)} rows")
+            df = existing
+        else:
+            log.warning("No GitLab dataset found in sweep mode — building from scratch")
+            df = build_full_dataset(start_year=START_YEAR)
+    elif force_refresh:
         log.info("Force refresh — rebuilding from scratch")
         df = build_full_dataset(start_year=START_YEAR)
     else:
@@ -313,47 +325,6 @@ def run_pipeline(force_refresh: bool = False,
 
 
 
-    # ── Write date-stamped sweep JSON to GitLab ──────────────────────────────
-    SWEEP_YEARS = [2008, 2013, 2015, 2017, 2019, 2021]
-    if not skip_gitlab_write and START_YEAR in SWEEP_YEARS:
-        try:
-            import json as _json, re as _re
-            from datetime import datetime as _dt, timezone as _tz, timedelta as _td
-            _date_tag   = (_dt.now(_tz.utc) - _td(hours=5)).strftime("%Y%m%d")
-            _sweep_data = {
-                "signal":      next_signal,
-                "ann_return":  round(metrics.get("ann_return", 0), 6),
-                "z_score":     round(conviction_z, 4),
-                "sharpe":      round(metrics.get("sharpe", 0), 4),
-                "max_dd":      round(metrics.get("max_dd", 0) / 100, 6),
-                "conviction":  conviction_label,
-                "regime":      regime_name,
-                "start_year":  START_YEAR,
-                "sweep_date":  _date_tag,
-            }
-            import os as _os, requests as _req
-            _gl_token = _os.environ.get("GITLAB_API_TOKEN", "")
-            _gl_url   = _os.environ.get("GITLAB_REPO_URL", "")
-            if _gl_token and _gl_url:
-                _match   = _re.search(r"projects/([^/?]+)", _gl_url)
-                _proj    = _match.group(1) if _match else None
-                _gl_base = _gl_url.split("/api/")[0] if "/api/" in _gl_url else "https://gitlab.com"
-                if _proj:
-                    _fname   = f"data/sweep_{START_YEAR}_{_date_tag}.json"
-                    _fpath   = _fname.replace("/", "%2F")
-                    _api     = f"{_gl_base}/api/v4/projects/{_proj}/repository/files/{_fpath}"
-                    _headers = {"PRIVATE-TOKEN": _gl_token, "Content-Type": "application/json"}
-                    _body    = {"branch": "main",
-                                "content": _json.dumps(_sweep_data, indent=2),
-                                "commit_message": f"[sweep] {START_YEAR} {_date_tag}"}
-                    _r = _req.put(_api, headers=_headers, json=_body, timeout=15)
-                    if _r.status_code in (400, 404):
-                        _req.post(_api, headers=_headers, json=_body, timeout=15)
-                    log.info(f"  Sweep JSON saved: {_fname}  "
-                             f"signal={next_signal}  z={conviction_z:.3f}")
-        except Exception as _e:
-            log.warning(f"  Sweep JSON write failed (non-fatal): {_e}")
-
     log.info("=" * 60)
     log.info("Pipeline complete.")
     log.info(f"  Next signal: {next_signal} ({conviction_label}, Z={conviction_z:.2f})")
@@ -376,10 +347,6 @@ if __name__ == "__main__":
         help="Rebuild dataset from scratch (ignore GitLab cache)"
     )
     parser.add_argument(
-        "--start-year", type=int, default=None,
-        help="Override training start year (e.g. 2008, 2013, 2015)"
-    )
-    parser.add_argument(
         "--local", action="store_true",
         help="Run without writing to GitLab (for local testing)"
     )
@@ -390,6 +357,10 @@ if __name__ == "__main__":
     parser.add_argument(
         "--wfcv", action="store_true",
         help="Run walk-forward cross-validation (diagnostic, slower)"
+    )
+    parser.add_argument(
+        "--sweep-mode", action="store_true",
+        help="Sweep mode: load dataset from GitLab only, skip yfinance downloads"
     )
     args = parser.parse_args()
 
@@ -413,14 +384,10 @@ if __name__ == "__main__":
         log.info("Walk-forward complete")
         sys.exit(0)
 
-    # Override START_YEAR if --start-year provided
-    if args.start_year:
-        import train as _self_mod
-        _self_mod.START_YEAR = args.start_year
-
     results = run_pipeline(
         force_refresh     = args.force_refresh,
         skip_gitlab_write = args.local,
         run_wfcv          = args.wfcv,
+        sweep_mode        = getattr(args, "sweep_mode", False),
     )
     sys.exit(0)
