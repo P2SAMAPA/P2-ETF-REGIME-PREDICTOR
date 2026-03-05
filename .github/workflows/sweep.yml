@@ -78,7 +78,7 @@ jobs:
       - uses: actions/setup-python@v5
         with: {python-version: "3.11", cache: "pip"}
       - run: pip install -r requirements.txt
-      - run: python train.py --force-refresh --start-year 2008
+      - run: python train.py --sweep-mode --start-year 2008
 
   sweep_2013:
     if: >
@@ -95,7 +95,7 @@ jobs:
       - uses: actions/setup-python@v5
         with: {python-version: "3.11", cache: "pip"}
       - run: pip install -r requirements.txt
-      - run: python train.py --force-refresh --start-year 2013
+      - run: python train.py --sweep-mode --start-year 2013
 
   sweep_2015:
     if: >
@@ -112,7 +112,7 @@ jobs:
       - uses: actions/setup-python@v5
         with: {python-version: "3.11", cache: "pip"}
       - run: pip install -r requirements.txt
-      - run: python train.py --force-refresh --start-year 2015
+      - run: python train.py --sweep-mode --start-year 2015
 
   sweep_2017:
     if: >
@@ -129,7 +129,7 @@ jobs:
       - uses: actions/setup-python@v5
         with: {python-version: "3.11", cache: "pip"}
       - run: pip install -r requirements.txt
-      - run: python train.py --force-refresh --start-year 2017
+      - run: python train.py --sweep-mode --start-year 2017
 
   sweep_2019:
     if: >
@@ -146,7 +146,7 @@ jobs:
       - uses: actions/setup-python@v5
         with: {python-version: "3.11", cache: "pip"}
       - run: pip install -r requirements.txt
-      - run: python train.py --force-refresh --start-year 2019
+      - run: python train.py --sweep-mode --start-year 2019
 
   sweep_2021:
     if: >
@@ -163,4 +163,4 @@ jobs:
       - uses: actions/setup-python@v5
         with: {python-version: "3.11", cache: "pip"}
       - run: pip install -r requirements.txt
-      - run: python train.py --force-refresh --start-year 2021
+      - run: python train.py --sweep-mode --start-year 2021
