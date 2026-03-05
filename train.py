@@ -81,8 +81,6 @@ def run_pipeline(force_refresh: bool = False,
     log.info("Step 1: Loading dataset...")
 
     if sweep_mode:
-        # Sweep jobs: always load shared dataset from GitLab — never re-download
-        # All 6 parallel jobs share the same underlying data, only start_year differs
         log.info("Sweep mode — loading shared dataset from GitLab (no yfinance calls)")
         existing = load_dataset_from_gitlab()
         if existing is not None:
@@ -360,9 +358,18 @@ if __name__ == "__main__":
     )
     parser.add_argument(
         "--sweep-mode", action="store_true",
-        help="Sweep mode: load dataset from GitLab only, skip yfinance downloads"
+        help="Sweep mode: load dataset from GitLab only, no yfinance calls"
+    )
+    parser.add_argument(
+        "--start-year", type=int, default=None,
+        help="Override training start year for sweep backtest cutoff"
     )
     args = parser.parse_args()
+
+    # Apply --start-year override
+    if args.start_year:
+        import train as _self
+        _self.START_YEAR = args.start_year
 
     # Walk-forward only mode — load existing data, skip retrain
     if args.wfcv_only:
@@ -388,6 +395,6 @@ if __name__ == "__main__":
         force_refresh     = args.force_refresh,
         skip_gitlab_write = args.local,
         run_wfcv          = args.wfcv,
-        sweep_mode        = getattr(args, "sweep_mode", False),
+        sweep_mode        = args.sweep_mode,
     )
     sys.exit(0)
