@@ -192,7 +192,7 @@ def fetch_yfinance(tickers: list, start: str = "2005-01-01") -> pd.DataFrame:
     """Fetch OHLCV from yfinance for multiple tickers."""
     try:
         raw = yf.download(tickers, start=start, auto_adjust=True,
-                          progress=False, threads=True)
+                          progress=False, threads=False)
         if raw.empty:
             raise ValueError("yfinance returned empty DataFrame")
         return raw
@@ -613,6 +613,25 @@ def save_predictions_to_gitlab(pred_df: pd.DataFrame,
         path, pred_df.to_csv(),
         f"Update predictions {pred_df.index[-1].date()} ({len(pred_df)} rows)"
     )
+
+
+def save_sweep_to_gitlab(results: dict, start_year: int) -> bool:
+    """
+    Save sweep result for one start_year as a date-stamped JSON file.
+    Filename: data/sweep_{start_year}_{YYYYMMDD}.json
+    app.py reads these files to build the consensus view.
+    """
+    from datetime import datetime, timezone, timedelta
+    today_est = (datetime.now(timezone.utc) - timedelta(hours=5)).strftime("%Y%m%d")
+    path      = f"data/sweep_{start_year}_{today_est}.json"
+    import json
+    content_str = json.dumps(results, indent=2, default=str)
+    ok = gitlab_write_file(
+        path, content_str,
+        f"Sweep result {start_year} — {today_est}"
+    )
+    log.info(f"  Sweep result saved ({start_year}): {ok} → {path}")
+    return ok
 
 
 def load_predictions_from_gitlab(path: str = "data/pred_history.csv") -> Optional[pd.DataFrame]:
