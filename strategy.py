@@ -28,12 +28,20 @@ log = logging.getLogger(__name__)
 
 TARGET_ETFS = ["TLT", "VNQ", "SLV", "GLD", "LQD", "HYG"]
 
-
 # Fixed Z threshold — 0.7 sigma across all regimes
 DEFAULT_Z_MIN = 0.7
 
+
 def compute_conviction(p_beat_cash: np.ndarray) -> Tuple[int, float, str]:
-    """Conviction Z-score from P(beat cash) array. Returns (best_idx, z, label)."""
+    """
+    Cross-sectional conviction from P(beat cash) array on a single day.
+    Returns (best_idx, z, label).
+
+    NOTE: This Z is cross-sectional (spread across 6 ETFs on one day).
+    It is used for the live conviction gate and the signal banner only.
+    Do NOT use this Z in the sweep payload — use compute_sweep_z() instead,
+    which computes a meaningful time-series Z from backtest metrics.
+    """
     mean = np.mean(p_beat_cash)
     std  = np.std(p_beat_cash)
     if std < 1e-9:
@@ -46,16 +54,49 @@ def compute_conviction(p_beat_cash: np.ndarray) -> Tuple[int, float, str]:
     return best, z, label
 
 
+def compute_sweep_z(strat_rets: np.ndarray, rf_rate: float = 0.045) -> Tuple[float, str]:
+    """
+    Compute a meaningful sweep conviction Z from the backtest return series.
+
+    This is a t-statistic on whether the strategy's mean daily excess return
+    is significantly different from zero:
+        Z = (mean_excess / std_excess) * sqrt(n)
+
+    Unlike compute_conviction() which produces an identical ~1.54σ for all
+    sweep years (cross-sectional artifact), this varies meaningfully across
+    start years because it reflects actual strategy performance.
+
+    Returns (z_score, conviction_label).
+    """
+    if len(strat_rets) < 10:
+        return 0.0, "Low"
+
+    daily_rf = rf_rate / 252
+    excess   = strat_rets - daily_rf
+    mean_ex  = float(np.mean(excess))
+    std_ex   = float(np.std(excess))
+
+    if std_ex < 1e-9:
+        return 0.0, "Low"
+
+    z = float(mean_ex / std_ex * np.sqrt(len(excess)))
+
+    label = ("Very High" if z >= 3.0 else
+             "High"      if z >= 1.5 else
+             "Moderate"  if z >= 0.5 else "Low")
+    return round(z, 3), label
+
+
 # Per-ETF stop multipliers applied to user's slider value
-# Tighter stops for leveraged/volatile instruments
 ETF_STOP_MULTIPLIER = {
-    "TLT": 1.00,   # Full stop — standard bond ETF
-    "VNQ": 1.00,   # Full stop — standard REIT ETF
-    "SLV": 0.75,   # 75% stop — commodity volatility
-    "GLD": 0.75,   # 75% stop — commodity volatility
-    "LQD": 1.00,   # Full stop — IG corporate bonds
-    "HYG": 0.85,   # Slightly tighter — HY has higher vol
+    "TLT": 1.00,
+    "VNQ": 1.00,
+    "SLV": 0.75,
+    "GLD": 0.75,
+    "LQD": 1.00,
+    "HYG": 0.85,
 }
+
 
 def execute_strategy(
     predictions_df:  pd.DataFrame,
@@ -69,30 +110,22 @@ def execute_strategy(
     """
     Execute strategy on prediction history.
 
-    Parameters
-    ----------
-    predictions_df : indexed by date, columns TLT_P ... GLD_P, TLT_Disagree ...
-    daily_ret_df   : indexed by date, columns TLT_Ret ... GLD_Ret
-    rf_rate        : annualised 3M T-Bill rate
-    z_min_entry    : min conviction Z to enter position
-    z_reentry      : min conviction Z to re-enter after stop
-    stop_loss_pct  : 2-day cum return to trigger stop-loss
-    fee_bps        : one-way transaction cost
-    regime_series  : optional Series of regime names by date
-
     Returns (strat_rets, audit_trail, next_date, next_signal,
              conviction_z, conviction_label, last_p_array)
+
+    Note: conviction_z / conviction_label returned here are cross-sectional
+    (from the last day's p_array). For sweep quality metrics, use
+    compute_sweep_z(strat_rets) after calling this function.
     """
     daily_rf      = rf_rate / 252
     now_est       = datetime.now(_EST)
     today         = now_est.date()
-    market_closed = now_est.hour >= 16   # after 4pm EST market is closed
+    market_closed = now_est.hour >= 16
     fee           = fee_bps / 10_000
     strat_rets    = []
     audit_trail   = []
-    recent_rets   = []       # last 2 ACTIVE ETF returns for 2-day stop
-    etf_rets_buf  = []       # last 10 active ETF returns for HWM stop
-    # top_pick_rets removed (rotation disabled)
+    recent_rets   = []
+    etf_rets_buf  = []
     stop_active   = False
     cum_ret       = 1.0
     rotated_idx   = None
@@ -101,9 +134,9 @@ def execute_strategy(
     common_dates = predictions_df.index.intersection(daily_ret_df.index)
     pred_a       = predictions_df.loc[common_dates]
     ret_a        = daily_ret_df.loc[common_dates]
-    p_cols       = [f"{t}_P"   for t in TARGET_ETFS]
-    rs_cols      = [f"{t}_RS"  for t in TARGET_ETFS]   # LambdaRank scores
-    pa_cols      = [f"{t}_PA"  for t in TARGET_ETFS]   # P_Adjusted fallback
+    p_cols       = [f"{t}_P"        for t in TARGET_ETFS]
+    rs_cols      = [f"{t}_RS"       for t in TARGET_ETFS]
+    pa_cols      = [f"{t}_PA"       for t in TARGET_ETFS]
     dis_cols     = [f"{t}_Disagree" for t in TARGET_ETFS]
 
     for i, trade_date in enumerate(common_dates):
@@ -114,36 +147,27 @@ def execute_strategy(
                               for j, c in enumerate(pa_cols)])
         dis_arr  = np.array([bool(row.get(c, False)) for c in dis_cols])
 
-        # Primary ranking: LambdaRank score if available, else P_Adjusted
         rank_input = rs_array if rs_array.std() > 1e-6 else pa_array
         ranked     = np.argsort(rank_input)[::-1]
         best_idx   = int(ranked[0])
-        second_idx = int(ranked[1]) if len(ranked) > 1 else best_idx
         _, day_z, day_label = compute_conviction(p_array)
 
-        # ── Regime name for this day ──────────────────────────────────────
         current_regime_name = ""
         if regime_series is not None and trade_date in regime_series.index:
             current_regime_name = str(regime_series.loc[trade_date])
 
-        # ── Commodity sub-regime within Risk-On ───────────────────────────
-        # If SLV or GLD has strong positive adjusted score, treat as
-        # commodity-breakout environment (lower Z bar, different signals)
         if current_regime_name == "Risk-On":
             slv_pa = float(row.get("SLV_PA", 0.0))
             gld_pa = float(row.get("GLD_PA", 0.0))
             if slv_pa > 0.05 or gld_pa > 0.05:
                 current_regime_name = "Risk-On-Commodity"
 
-        z_min_entry = DEFAULT_Z_MIN
+        z_min_entry     = DEFAULT_Z_MIN
+        top_ret_col     = f"{TARGET_ETFS[best_idx]}_Ret"
+        top_actual      = float(ret_a.iloc[i].get(top_ret_col, 0.0))
 
-        top_ret_col = f"{TARGET_ETFS[best_idx]}_Ret"
-        top_actual  = float(ret_a.iloc[i].get(top_ret_col, 0.0))
-
-        # Rotation disabled — audit showed it consistently rotated into
-        # wrong ETFs (especially TBT in Risk-On), hurting performance
-        rotated_idx = None
-        active_idx  = best_idx
+        rotated_idx     = None
+        active_idx      = best_idx
         etf_name        = TARGET_ETFS[active_idx]
         active_disagree = bool(dis_arr[active_idx])
         effective_z     = day_z * 0.5 if active_disagree else day_z
@@ -151,16 +175,13 @@ def execute_strategy(
         act_ret_col = f"{etf_name}_Ret"
         realized    = float(ret_a.iloc[i].get(act_ret_col, 0.0))
 
-        # Per-ETF stop — multiplier applied to user's slider value
         etf_stop = stop_loss_pct * ETF_STOP_MULTIPLIER.get(etf_name, 1.0)
 
-        # ── Stop 1: 2-day stop on ACTIVE returns (not diluted by cash) ───
         two_day_breach = (
             len(recent_rets) >= 2 and
             (1 + recent_rets[-2]) * (1 + recent_rets[-1]) - 1 <= etf_stop
         )
 
-        # ── Stop 2: Trailing HWM stop on active ETF returns window ───────
         hwm_breach = False
         if len(etf_rets_buf) >= 3:
             cum_window = np.cumprod([1 + r for r in etf_rets_buf])
@@ -169,7 +190,6 @@ def execute_strategy(
             dd_window  = (current - peak) / (peak + 1e-9)
             hwm_breach = dd_window <= etf_stop * 0.75
 
-        # ── Decision ─────────────────────────────────────────────────────
         if stop_active:
             if effective_z >= z_reentry:
                 stop_active  = False
@@ -193,8 +213,6 @@ def execute_strategy(
         strat_rets.append(net_ret)
         cum_ret *= (1 + net_ret)
 
-        # Only track ACTIVE (non-cash) ETF returns in stop buffers
-        # Prevents cash days from diluting/resetting the stop signal
         if trade_signal != "CASH":
             recent_rets.append(realized)
             etf_rets_buf.append(realized)
@@ -203,16 +221,12 @@ def execute_strategy(
         if len(etf_rets_buf) > 10:
             etf_rets_buf.pop(0)
 
-        # top_pick_rets buffer removed (rotation disabled)
-
-        # Audit trail — closed days only
         td_val = trade_date.date() if hasattr(trade_date, "date") else trade_date
         if td_val < today or (td_val == today and market_closed):
             rname = ""
             if regime_series is not None and trade_date in regime_series.index:
                 rname = str(regime_series.loc[trade_date])
 
-            # Get actual returns for each ETF for transparency
             etf_rets = {}
             for etf in TARGET_ETFS:
                 rc = f"{etf}_Ret"
@@ -220,28 +234,26 @@ def execute_strategy(
                     float(ret_a.iloc[i].get(rc, 0.0)) * 100, 3
                 )
 
-            # Signal return = what the strategy actually earned
             signal_ret = (realized * 100 if trade_signal != "CASH"
                           else daily_rf * 100)
 
             entry = {
-                "Date":           td_val.strftime("%Y-%m-%d"),
-                "Signal":         trade_signal,
-                "Top_Pick":       TARGET_ETFS[best_idx],
-                "Regime":         rname,
-                "Conviction_Z":   round(day_z, 2),
-                "P_Top":          round(float(p_array[best_idx]), 3),
-                "Signal_Ret%":    round(signal_ret, 3),
-                "Stop_Active":    stop_active,
-                "Rotated":        rotated_idx is not None,
-                "Disagree":       active_disagree,
+                "Date":         td_val.strftime("%Y-%m-%d"),
+                "Signal":       trade_signal,
+                "Top_Pick":     TARGET_ETFS[best_idx],
+                "Regime":       rname,
+                "Conviction_Z": round(day_z, 2),
+                "P_Top":        round(float(p_array[best_idx]), 3),
+                "Signal_Ret%":  round(signal_ret, 3),
+                "Stop_Active":  stop_active,
+                "Rotated":      rotated_idx is not None,
+                "Disagree":     active_disagree,
             }
             entry.update(etf_rets)
             audit_trail.append(entry)
 
     strat_rets = np.array(strat_rets)
 
-    # Next trading day signal
     if len(common_dates) > 0:
         last_date   = common_dates[-1]
         next_date   = _next_trading_day(last_date)
@@ -268,14 +280,11 @@ def calculate_metrics(strat_rets: np.ndarray, rf_rate: float = 0.045) -> Dict:
     daily_rf    = rf_rate / 252
     excess      = strat_rets - daily_rf
     sharpe      = float(np.mean(excess)) / (float(np.std(excess)) + 1e-9) * np.sqrt(252)
-    # Hit ratio over full backtest (exclude CASH days = risk-free rate)
-    # Use tolerance comparison — floating point means exact equality fails
     daily_rf_scalar = rf_rate / 252
-    tol         = daily_rf_scalar * 0.01   # 1% tolerance
+    tol         = daily_rf_scalar * 0.01
     active_mask = np.abs(strat_rets - daily_rf_scalar) > tol
     active_days = strat_rets[active_mask]
     hit_ratio   = float(np.mean(active_days > 0)) if len(active_days) > 0 else 0.0
-    # Also compute recent 15d active days only
     recent_rets_15d = strat_rets[-15:]
     active_15d  = recent_rets_15d[np.abs(recent_rets_15d - daily_rf_scalar) > tol]
     recent_15d  = float(np.mean(active_15d > 0)) if len(active_15d) > 0 else 0.0
@@ -291,27 +300,26 @@ def calculate_metrics(strat_rets: np.ndarray, rf_rate: float = 0.045) -> Dict:
     avg_win     = float(np.mean(wins))   if len(wins)   > 0 else 0.0
     avg_loss    = float(np.mean(losses)) if len(losses) > 0 else 0.0
     return {
-        "cum_returns":  cum,
-        "ann_return":   ann_ret,
-        "sharpe":       sharpe,
-        "calmar":       calmar,
-        "hit_ratio":    hit_ratio,
-        "hit_ratio_15d": recent_15d,
+        "cum_returns":    cum,
+        "ann_return":     ann_ret,
+        "sharpe":         sharpe,
+        "calmar":         calmar,
+        "hit_ratio":      hit_ratio,
+        "hit_ratio_15d":  recent_15d,
         "max_dd":         max_dd,
         "max_dd_idx":     max_dd_idx,
         "max_daily_dd":   max_daily,
         "max_daily_idx":  max_daily_idx,
-        "avg_win":      avg_win,
-        "avg_loss":     avg_loss,
-        "win_loss_r":   abs(avg_win / (avg_loss + 1e-9)),
-        "cum_max":      cum_max,
-        "n_days":       n,
+        "avg_win":        avg_win,
+        "avg_loss":       avg_loss,
+        "win_loss_r":     abs(avg_win / (avg_loss + 1e-9)),
+        "cum_max":        cum_max,
+        "n_days":         n,
     }
 
 
 def calculate_benchmark_metrics(bench_rets: np.ndarray,
                                   rf_rate: float = 0.045) -> Dict:
-    """Metrics for benchmark (SPY or AGG)."""
     if len(bench_rets) == 0:
         return {}
     cum     = np.cumprod(1 + bench_rets)
@@ -331,7 +339,6 @@ def calculate_benchmark_metrics(bench_rets: np.ndarray,
 
 def build_signal_row(next_date, next_signal, conviction_z, conviction_label,
                       p_array, regime_int, regime_name, metrics) -> pd.DataFrame:
-    """Build a single-row DataFrame for appending to signals.csv."""
     row = {
         "Signal":           next_signal,
         "Conviction_Z":     round(conviction_z, 3),
@@ -348,7 +355,6 @@ def build_signal_row(next_date, next_signal, conviction_z, conviction_label,
 
 
 def _next_trading_day(last_date: pd.Timestamp) -> pd.Timestamp:
-    """Next business day — skips weekends."""
     nxt = last_date + pd.Timedelta(days=1)
     while nxt.weekday() >= 5:
         nxt += pd.Timedelta(days=1)
