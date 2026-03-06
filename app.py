@@ -216,20 +216,17 @@ def _trigger_sweep(years, gh_token, gh_repo):
     return resp.status_code == 204
 
 @st.cache_data(ttl=60, show_spinner=False)
+@st.cache_data(ttl=60, show_spinner=False)
 def _load_sweep_cache(date_str, _bust=0):
     """date_str + _bust ensures cache invalidates when manually cleared"""
     cache = {}
     try:
         import requests as _req
         gl_token = _os_sw.environ.get("GITLAB_API_TOKEN", "")
-        gl_url   = _os_sw.environ.get("GITLAB_REPO_URL", "")
-        if not gl_token or not gl_url:
+        if not gl_token:
             return cache
-        match   = _re_sw.search(r"projects/([^/?]+)", gl_url)
-        proj    = match.group(1) if match else None
-        gl_base = gl_url.split("/api/")[0] if "/api/" in gl_url else "https://gitlab.com"
-        if not proj:
-            return cache
+        proj    = "P2SAMAPA%2Fp2-etf-regime-predictor"
+        gl_base = "https://gitlab.com"
         headers = {"PRIVATE-TOKEN": gl_token}
         for yr in SWEEP_YEARS:
             fname = f"data%2Fsweep_{yr}_{date_str}.json"
@@ -253,11 +250,11 @@ def _load_sweep_any(_bust=0):
         import requests as _req
         from datetime import datetime as _dt2
         gl_token = _os_sw.environ.get("GITLAB_API_TOKEN", "")
-        gl_url   = _os_sw.environ.get("GITLAB_REPO_URL", "")
-        match    = _re_sw.search(r"projects/([^/?]+)", gl_url)
-        proj     = match.group(1) if match else None
-        gl_base  = gl_url.split("/api/")[0] if "/api/" in gl_url else "https://gitlab.com"
-        headers  = {"PRIVATE-TOKEN": gl_token}
+        if not gl_token:
+            return found, best_date
+        proj    = "P2SAMAPA%2Fp2-etf-regime-predictor"
+        gl_base = "https://gitlab.com"
+        headers = {"PRIVATE-TOKEN": gl_token}
         r = _req.get(
             f"{gl_base}/api/v4/projects/{proj}/repository/tree?path=data&per_page=100&ref=main",
             headers=headers, timeout=10,
