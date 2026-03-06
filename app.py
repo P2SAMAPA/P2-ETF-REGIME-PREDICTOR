@@ -215,8 +215,9 @@ def _trigger_sweep(years, gh_token, gh_repo):
     )
     return resp.status_code == 204
 
-@st.cache_data(ttl=120)
-def _load_sweep_cache(date_str):
+@st.cache_data(ttl=60, show_spinner=False)
+def _load_sweep_cache(date_str, _bust=0):
+    """date_str + _bust ensures cache invalidates when manually cleared"""
     cache = {}
     try:
         import requests as _req
@@ -245,8 +246,8 @@ def _load_sweep_cache(date_str):
         pass
     return cache
 
-@st.cache_data(ttl=120)
-def _load_sweep_any():
+@st.cache_data(ttl=60, show_spinner=False)
+def _load_sweep_any(_bust=0):
     found, best_date = {}, None
     try:
         import requests as _req
@@ -367,8 +368,12 @@ with tab2:
     today_sw  = _today_est()
     today_str = today_sw.strftime("%Y%m%d")
 
-    today_cache           = _load_sweep_cache(today_str)
-    prev_cache, prev_date = _load_sweep_any()
+    # _sweep_bust increments when user clicks "Clear Cache" — forces fresh fetch
+    if "sweep_bust" not in st.session_state:
+        st.session_state.sweep_bust = 0
+
+    today_cache           = _load_sweep_cache(today_str, _bust=st.session_state.sweep_bust)
+    prev_cache, prev_date = _load_sweep_any(_bust=st.session_state.sweep_bust)
     if prev_date == today_sw:
         prev_cache, prev_date = {}, None
 
@@ -399,11 +404,16 @@ with tab2:
                                 help="Re-trains even if today\'s results already exist")
     _trigger_yrs  = SWEEP_YEARS if _force_rerun else _missing
 
-    _cb, _ci = st.columns([1, 3])
+    _cb, _cr, _ci = st.columns([1, 1, 2])
     with _cb:
         _sweep_btn = st.button("🚀 Run Consensus Sweep", type="primary",
                                use_container_width=True,
                                disabled=(sweep_complete and not _force_rerun))
+    with _cr:
+        if st.button("🔄 Refresh Results", use_container_width=True):
+            st.session_state.sweep_bust += 1
+            st.cache_data.clear()
+            st.rerun()
     with _ci:
         if sweep_complete and not _force_rerun:
             st.success(f"✅ Today\'s sweep complete ({today_sw}) — all {len(SWEEP_YEARS)} years ready")
