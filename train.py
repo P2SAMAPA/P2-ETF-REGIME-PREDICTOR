@@ -40,7 +40,7 @@ from data_manager import (
     build_forward_targets, load_dataset_from_gitlab,
     save_dataset_to_gitlab, save_model_to_gitlab,
     save_signals_to_gitlab, save_feature_list_to_gitlab,
-    load_model_from_gitlab, TARGET_ETFS,
+    load_model_from_gitlab, save_sweep_to_gitlab, TARGET_ETFS,
 )
 from regime_detection import RegimeDetector
 from models import MomentumRanker, get_feature_columns
@@ -311,6 +311,21 @@ def run_pipeline(force_refresh: bool = False,
                 log.error(f"  Walk-forward failed: {e}")
         else:
             log.info("Step 6: Skipping walk-forward (--wfcv not set)")
+
+        # Sweep result — save per-year JSON for consensus tab
+        if sweep_mode and args.start_year:
+            sweep_payload = {
+                "signal":      next_signal,
+                "ann_return":  round(metrics.get("ann_return", 0), 4),
+                "z_score":     round(conviction_z, 3),
+                "sharpe":      round(metrics.get("sharpe", 0), 3),
+                "max_dd":      round(metrics.get("max_dd", 0), 4),
+                "conviction":  conviction_label,
+                "regime":      regime_name,
+                "start_year":  args.start_year,
+            }
+            ok = save_sweep_to_gitlab(sweep_payload, args.start_year)
+            log.info(f"  Sweep result saved ({args.start_year}): {ok}")
 
         # Signals
         ok = save_signals_to_gitlab(signal_row)
