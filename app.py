@@ -409,7 +409,8 @@ with tab2:
     with _cr:
         if st.button("🔄 Refresh Results", use_container_width=True):
             st.session_state.sweep_bust += 1
-            st.cache_data.clear()
+            _load_sweep_cache.clear()
+            _load_sweep_any.clear()
             st.rerun()
     with _ci:
         if sweep_complete and not _force_rerun:
