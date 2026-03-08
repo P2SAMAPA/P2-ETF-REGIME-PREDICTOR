@@ -213,7 +213,20 @@ def run_pipeline(force_refresh: bool = False,
     daily_rets = df[ret_cols]
 
     cutoff  = pd.Timestamp(f"{effective_start_year}-01-01")
-    pred_bt = pred_history[pred_history.index >= cutoff]
+
+    # SWEEP FIX: use momentum ranker predictions for backtest, not model bank.
+    # The momentum ranker is the live production signal (Layer 2B).
+    # RegimeModelBank predictions (pred_history) are used only for p_array/
+    # conviction display. Using model bank for sweep backtest produced
+    # large negative returns (-14% to -22%) because the bank overfits
+    # to in-sample data and generalises poorly across different start years.
+    if sweep_mode and mom_pred is not None:
+        log.info("  Sweep mode: using momentum ranker predictions for backtest")
+        bt_predictions = mom_pred
+    else:
+        bt_predictions = pred_history
+
+    pred_bt = bt_predictions[bt_predictions.index >= cutoff]
     rets_bt = daily_rets[daily_rets.index >= cutoff]
     reg_bt  = (df["Regime_Name"][df.index >= cutoff]
                if "Regime_Name" in df.columns else None)
@@ -248,8 +261,16 @@ def run_pipeline(force_refresh: bool = False,
     regime_int, regime_name = 0, "Unknown"
     try:
         regime_int, regime_name = detector.get_current_regime(df)
-    except Exception:
-        pass
+    except Exception as e:
+        log.warning(f"get_current_regime failed: {e} — using last labelled regime")
+    # Fallback: read regime directly from the labelled df column
+    if regime_name == "Unknown" and "Regime_Name" in df.columns:
+        last_regime_name = str(df["Regime_Name"].dropna().iloc[-1])
+        if last_regime_name not in ("Unknown", "Global", "nan", ""):
+            regime_name = last_regime_name
+            log.info(f"  Regime from df column: {regime_name}")
+    if regime_int == 0 and "Regime" in df.columns:
+        regime_int = int(df["Regime"].dropna().iloc[-1])
 
     sweep_regime_name = regime_name
     if reg_bt is not None and len(reg_bt) > 0:
