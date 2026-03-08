@@ -215,10 +215,9 @@ def _trigger_sweep(years, gh_token, gh_repo):
     )
     return resp.status_code == 204
 
-
 @st.cache_data(ttl=60, show_spinner=False)
 def _load_sweep_cache(date_str, _bust=0):
-    """date_str + _bust ensures cache invalidates when manually cleared"""
+    """Load sweep files specifically dated today (date_str = YYYYMMDD)."""
     cache = {}
     try:
         import requests as _req
@@ -245,6 +244,14 @@ def _load_sweep_cache(date_str, _bust=0):
 
 @st.cache_data(ttl=60, show_spinner=False)
 def _load_sweep_any(_bust=0):
+    """
+    Load the most recent sweep result for EACH year independently.
+    Fix: old version picked ONE global best_date — if year 2013 only had
+    a 20260307 file but best_date was 20260308, it returned nothing for 2013.
+    New version: per-year independent date lookup — always shows latest per year.
+    Returns (found_dict, display_date) where display_date is the most
+    recent date seen across any year.
+    """
     found, best_date = {}, None
     try:
         import requests as _req
@@ -261,30 +268,40 @@ def _load_sweep_any(_bust=0):
         )
         if r.status_code != 200:
             return found, best_date
+
+        # Build per-year most-recent-date map
+        year_best = {}
         for item in r.json():
-            name = item.get("name","")
+            name = item.get("name", "")
             if name.startswith("sweep_") and name.endswith(".json"):
-                parts = name.replace(".json","").split("_")
+                parts = name.replace(".json", "").split("_")
                 if len(parts) == 3:
                     try:
-                        dt = _dt2.strptime(parts[2], "%Y%m%d").date()
-                        if best_date is None or dt > best_date:
-                            best_date = dt
+                        yr_int = int(parts[1])
+                        dt     = _dt2.strptime(parts[2], "%Y%m%d").date()
+                        if yr_int not in year_best or dt > year_best[yr_int]:
+                            year_best[yr_int] = dt
                     except Exception:
                         pass
-        if best_date:
-            date_str = best_date.strftime("%Y%m%d")
-            for yr in SWEEP_YEARS:
-                fname = f"data%2Fsweep_{yr}_{date_str}.json"
-                r2 = _req.get(
-                    f"{gl_base}/api/v4/projects/{proj}/repository/files/{fname}/raw?ref=main",
-                    headers=headers, timeout=10,
-                )
-                if r2.status_code == 200:
-                    try:
-                        found[yr] = r2.json()
-                    except Exception:
-                        pass
+
+        # Fetch most recent file per year independently
+        for yr in SWEEP_YEARS:
+            if yr not in year_best:
+                continue
+            yr_date  = year_best[yr]
+            date_str = yr_date.strftime("%Y%m%d")
+            fname    = f"data%2Fsweep_{yr}_{date_str}.json"
+            r2 = _req.get(
+                f"{gl_base}/api/v4/projects/{proj}/repository/files/{fname}/raw?ref=main",
+                headers=headers, timeout=10,
+            )
+            if r2.status_code == 200:
+                try:
+                    found[yr] = r2.json()
+                    if best_date is None or yr_date > best_date:
+                        best_date = yr_date
+                except Exception:
+                    pass
     except Exception:
         pass
     return found, best_date
@@ -365,24 +382,32 @@ with tab2:
     today_sw  = _today_est()
     today_str = today_sw.strftime("%Y%m%d")
 
-    # _sweep_bust increments when user clicks "Clear Cache" — forces fresh fetch
     if "sweep_bust" not in st.session_state:
         st.session_state.sweep_bust = 0
 
-    today_cache           = _load_sweep_cache(today_str, _bust=st.session_state.sweep_bust)
-    prev_cache, prev_date = _load_sweep_any(_bust=st.session_state.sweep_bust)
-    if prev_date == today_sw:
-        prev_cache, prev_date = {}, None
+    today_cache          = _load_sweep_cache(today_str, _bust=st.session_state.sweep_bust)
+    all_cache, best_date = _load_sweep_any(_bust=st.session_state.sweep_bust)
+
+    # prev_cache = years that have ANY result but were NOT run today
+    # This replaces the old "wipe prev_cache if prev_date == today" logic which
+    # caused 2013/2015 to disappear when some years ran today and some hadn't yet
+    prev_cache = {yr: v for yr, v in all_cache.items() if yr not in today_cache}
+
+    # Merged display: today takes priority, fill gaps with prev
+    # Ensures consensus uses ALL 6 years, not just the 4 that ran today
+    display_cache = {**prev_cache, **today_cache}
+    display_date  = today_sw if today_cache else best_date
 
     sweep_complete = len(today_cache) == len(SWEEP_YEARS)
-    display_cache  = today_cache if today_cache else prev_cache
-    display_date   = today_sw    if today_cache else prev_date
 
-    if display_cache and display_date and display_date < today_sw:
-        st.warning(f"⚠️ Showing results from **{display_date}**. "
-                   "Today's sweep hasn't run yet — auto-triggers at 8pm EST.", icon="📅")
+    if prev_cache and not sweep_complete:
+        st.warning(
+            f"⚠️ {len(prev_cache)} year(s) showing previous results "
+            f"({', '.join(str(y) for y in sorted(prev_cache.keys()))}). "
+            "Today's sweep hasn't run for these yet.", icon="📅"
+        )
 
-    # Status grid
+    # Status grid — per-year today vs prev vs not run
     _cols = st.columns(len(SWEEP_YEARS))
     for _i, _yr in enumerate(SWEEP_YEARS):
         with _cols[_i]:
@@ -392,7 +417,7 @@ with tab2:
                 st.warning(f"**{_yr}**\n📅 {prev_cache[_yr].get('signal','?')}")
             else:
                 st.error(f"**{_yr}**\n⏳ Not run")
-    st.caption("✅ today · 📅 previous day · ⏳ not run")
+    st.caption("✅ today · 📅 previous · ⏳ not run")
     st.divider()
 
     # Run button
@@ -416,7 +441,8 @@ with tab2:
         if sweep_complete and not _force_rerun:
             st.success(f"✅ Today\'s sweep complete ({today_sw}) — all {len(SWEEP_YEARS)} years ready")
         else:
-            st.info(f"**{len(today_cache)}/{len(SWEEP_YEARS)}** years done today.  \n"
+            st.info(f"**{len(today_cache)}/{len(SWEEP_YEARS)}** years done today · "
+                    f"**{len(display_cache)}/{len(SWEEP_YEARS)}** total available.  \n"
                     f"Will trigger **{len(_trigger_yrs)}** jobs: {', '.join(str(y) for y in _trigger_yrs)}")
 
     if _sweep_btn and _trigger_yrs:
