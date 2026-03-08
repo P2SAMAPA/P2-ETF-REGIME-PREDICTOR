@@ -215,7 +215,7 @@ def _trigger_sweep(years, gh_token, gh_repo):
     )
     return resp.status_code == 204
 
-@st.cache_data(ttl=60, show_spinner=False)
+
 @st.cache_data(ttl=60, show_spinner=False)
 def _load_sweep_cache(date_str, _bust=0):
     """date_str + _bust ensures cache invalidates when manually cleared"""
