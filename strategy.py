@@ -355,6 +355,22 @@ def build_signal_row(next_date, next_signal, conviction_z, conviction_label,
 
 
 def _next_trading_day(last_date: pd.Timestamp) -> pd.Timestamp:
+    """
+    Return the next NYSE trading day after last_date.
+    Uses pandas_market_calendars if available for holiday awareness.
+    Falls back to weekend-only skip if not installed.
+    """
+    try:
+        import pandas_market_calendars as mcal
+        nyse  = mcal.get_calendar("NYSE")
+        start = (last_date + pd.Timedelta(days=1)).strftime("%Y-%m-%d")
+        end   = (last_date + pd.Timedelta(days=14)).strftime("%Y-%m-%d")
+        sched = nyse.schedule(start_date=start, end_date=end)
+        if not sched.empty:
+            return pd.Timestamp(sched.index[0])
+    except ImportError:
+        pass
+    # Fallback: skip weekends only
     nxt = last_date + pd.Timedelta(days=1)
     while nxt.weekday() >= 5:
         nxt += pd.Timedelta(days=1)
