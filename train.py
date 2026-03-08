@@ -4,6 +4,14 @@ train.py — P2-ETF-REGIME-PREDICTOR
 Daily training pipeline orchestrator.
 Called by GitHub Actions at 6:30am EST on weekdays.
 
+Sweep mode optimisations (--sweep-mode):
+  1. Loads existing regime detector from GitLab instead of refitting
+     — saves ~25 mins per job (regime labels don't vary by start_year)
+  2. Falls back to fast-path refit (n_init=2, max_windows=600, k=3)
+     only if no saved detector found
+  3. Skips momentum ranker refit — loads from GitLab
+  4. Only varies: backtest window (cutoff = start_year)
+
 Author: P2SAMAPA
 """
 
@@ -63,12 +71,14 @@ def run_pipeline(force_refresh: bool = False,
     log.info("Step 1: Loading dataset...")
     if sweep_mode:
         existing = load_dataset_from_gitlab()
-        df = existing if existing is not None else build_full_dataset(start_year=DEFAULT_START_YEAR)
+        df = existing if existing is not None else build_full_dataset(
+            start_year=DEFAULT_START_YEAR)
     elif force_refresh:
         df = build_full_dataset(start_year=DEFAULT_START_YEAR)
     else:
         existing = load_dataset_from_gitlab()
-        df = incremental_update(existing) if existing is not None else build_full_dataset(start_year=DEFAULT_START_YEAR)
+        df = (incremental_update(existing) if existing is not None
+              else build_full_dataset(start_year=DEFAULT_START_YEAR))
 
     log.info(f"Dataset: {len(df)} rows × {df.shape[1]} cols "
              f"({df.index[0].date()} → {df.index[-1].date()})")
@@ -77,18 +87,48 @@ def run_pipeline(force_refresh: bool = False,
 
     # ── Step 2: Regime detection ───────────────────────────────────────────────
     log.info("Step 2: Wasserstein k-means regime detection...")
-    detector = RegimeDetector()
-    try:
-        detector.fit(df)
-        df = detector.add_regime_to_df(df)
-        log.info(detector.summary())
+    detector = None
+
+    if sweep_mode:
+        # ── SWEEP OPTIMISATION 1: reuse saved detector ────────────────────────
+        # Regime labels are global (trained on full history) and do not vary
+        # by start_year. Loading the saved detector saves ~25 mins per job.
+        log.info("  Sweep mode: attempting to load saved detector from GitLab...")
+        try:
+            det_bytes = load_model_from_gitlab("regime_detector.pkl")
+            if det_bytes:
+                detector = RegimeDetector.from_bytes(det_bytes)
+                log.info(f"  ✅ Loaded saved detector "
+                         f"(k={detector.optimal_k_}, "
+                         f"regimes={list(detector.regime_names_.values())})")
+            else:
+                log.warning("  No saved detector found — will refit with fast path")
+        except Exception as e:
+            log.warning(f"  Could not load saved detector: {e} — will refit")
+
+    if detector is None:
+        # Full refit (daily pipeline) or sweep fallback
+        detector = RegimeDetector()
+        try:
+            detector.fit(df, sweep_mode=sweep_mode)
+            log.info(detector.summary())
+            results["optimal_k"]    = detector.optimal_k_
+            results["regime_names"] = detector.regime_names_
+        except Exception as e:
+            log.error(f"Regime detection failed: {e}")
+            df["Regime"]      = 0
+            df["Regime_Name"] = "Global"
+            results["optimal_k"] = 1
+    else:
         results["optimal_k"]    = detector.optimal_k_
         results["regime_names"] = detector.regime_names_
+
+    try:
+        df = detector.add_regime_to_df(df)
     except Exception as e:
-        log.error(f"Regime detection failed: {e}")
+        log.error(f"add_regime_to_df failed: {e}")
         df["Regime"]      = 0
         df["Regime_Name"] = "Global"
-        results["optimal_k"] = 1
 
     df["Regime"]      = df["Regime"].fillna(0).astype(int)
     df["Regime_Name"] = df["Regime_Name"].fillna("Global")
@@ -105,14 +145,17 @@ def run_pipeline(force_refresh: bool = False,
     # ── Step 4: Train model bank ───────────────────────────────────────────────
     log.info("Step 4: Training LightGBM + LogReg model bank...")
     from models import MomentumRanker, RegimeModelBank
-    bank = RegimeModelBank()
+    bank         = RegimeModelBank()
     common_idx   = df.index.intersection(fwd_df.dropna(how="all").index)
     df_train     = df.loc[common_idx]
     fwd_train    = fwd_df.loc[common_idx]
     feature_cols = get_feature_columns(df_train)
-    df_train[feature_cols] = df_train[feature_cols].fillna(df_train[feature_cols].median()).fillna(0.0)
+    df_train[feature_cols] = (df_train[feature_cols]
+                              .fillna(df_train[feature_cols].median())
+                              .fillna(0.0))
     try:
-        bank.fit(df_train, fwd_train, feature_cols=feature_cols, val_pct=VAL_PCT)
+        bank.fit(df_train, fwd_train, feature_cols=feature_cols,
+                 val_pct=VAL_PCT)
         results["n_models"] = len(bank.models_)
     except Exception as e:
         log.error(f"Model training failed: {e}")
@@ -121,7 +164,9 @@ def run_pipeline(force_refresh: bool = False,
     # ── Step 5: Generate prediction history ───────────────────────────────────
     log.info("Step 5: Generating prediction history...")
     df["Regime"] = df["Regime"].fillna(0).astype(int)
-    df[feature_cols] = df[feature_cols].fillna(df[feature_cols].median()).fillna(0.0)
+    df[feature_cols] = (df[feature_cols]
+                        .fillna(df[feature_cols].median())
+                        .fillna(0.0))
     try:
         pred_history = bank.predict_all_history(df)
         results["pred_history_rows"] = len(pred_history)
@@ -133,12 +178,31 @@ def run_pipeline(force_refresh: bool = False,
     log.info("Step 5b: Training Layer 2B momentum ranker...")
     momentum_ranker = None
     mom_pred        = None
-    try:
-        momentum_ranker = MomentumRanker()
-        momentum_ranker.fit(df)
-        mom_pred = momentum_ranker.predict_all_history(df)
-    except Exception as e:
-        log.error(f"Momentum ranker failed: {e}")
+
+    if sweep_mode:
+        # ── SWEEP OPTIMISATION 2: reuse saved momentum ranker ─────────────────
+        # Ranker is fit on full history — identical across all start years.
+        log.info("  Sweep mode: attempting to load saved momentum ranker from GitLab...")
+        try:
+            from data_manager import load_momentum_ranker_from_gitlab
+            mom_bytes = load_momentum_ranker_from_gitlab()
+            if mom_bytes:
+                momentum_ranker = MomentumRanker.from_bytes(mom_bytes)
+                mom_pred = momentum_ranker.predict_all_history(df)
+                log.info(f"  ✅ Loaded saved momentum ranker, "
+                         f"generated {len(mom_pred)} prediction rows")
+            else:
+                log.warning("  No saved ranker found — will refit")
+        except Exception as e:
+            log.warning(f"  Could not load saved ranker: {e} — will refit")
+
+    if momentum_ranker is None:
+        try:
+            momentum_ranker = MomentumRanker()
+            momentum_ranker.fit(df)
+            mom_pred = momentum_ranker.predict_all_history(df)
+        except Exception as e:
+            log.error(f"Momentum ranker failed: {e}")
 
     # ── Step 6: Run backtest ───────────────────────────────────────────────────
     log.info("Step 6: Running backtest...")
@@ -181,18 +245,13 @@ def run_pipeline(force_refresh: bool = False,
     # ── Step 7: Generate next-day signal ──────────────────────────────────────
     log.info("Step 7: Next trading day signal...")
 
-    # Regime for signal banner — current day on full dataset
     regime_int, regime_name = 0, "Unknown"
     try:
         regime_int, regime_name = detector.get_current_regime(df)
     except Exception:
         pass
 
-    # Regime for sweep payload — last regime in the BACKTESTED window.
-    # Previously get_current_regime(df) was used here, which always
-    # returned today's regime regardless of start_year, producing identical
-    # "Unknown" for all 6 sweep rows.
-    sweep_regime_name = regime_name  # fallback
+    sweep_regime_name = regime_name
     if reg_bt is not None and len(reg_bt) > 0:
         sweep_regime_name = str(reg_bt.iloc[-1])
 
@@ -221,36 +280,33 @@ def run_pipeline(force_refresh: bool = False,
         save_predictions_to_gitlab(pred_history)
         save_dataset_to_gitlab(df)
         save_feature_list_to_gitlab(feature_cols)
-        save_model_to_gitlab(detector.to_bytes(), "regime_detector.pkl")
-        save_model_to_gitlab(bank.to_bytes(), "model_bank.pkl")
 
-        if momentum_ranker is not None:
-            save_model_to_gitlab(momentum_ranker.to_bytes(), "momentum_ranker.pkl")
-        if mom_pred is not None:
-            save_predictions_to_gitlab(mom_pred, "data/mom_pred_history.csv")
+        # Only save detector + bank in full pipeline mode
+        # Sweep mode reuses the existing saved versions
+        if not sweep_mode:
+            save_model_to_gitlab(detector.to_bytes(), "regime_detector.pkl")
+            save_model_to_gitlab(bank.to_bytes(), "model_bank.pkl")
+            if momentum_ranker is not None:
+                save_model_to_gitlab(momentum_ranker.to_bytes(),
+                                     "momentum_ranker.pkl")
+            if mom_pred is not None:
+                save_predictions_to_gitlab(mom_pred,
+                                           "data/mom_pred_history.csv")
 
         if run_wfcv:
-            log.info("  Running Option B (Momentum) walk-forward...")
+            log.info("  Running walk-forward CV...")
             try:
                 from models import walk_forward_cv
-                wf_mom = walk_forward_cv(df=df, fwd_df=fwd_df, mode="momentum",
-                                         train_years=3, test_years=1)
+                wf_mom = walk_forward_cv(df=df, fwd_df=fwd_df,
+                                          mode="momentum",
+                                          train_years=3, test_years=1)
                 if not wf_mom.empty:
-                    save_predictions_to_gitlab(wf_mom, "data/wf_mom_pred_history.csv")
+                    save_predictions_to_gitlab(
+                        wf_mom, "data/wf_mom_pred_history.csv")
             except Exception as e:
                 log.error(f"  Walk-forward failed: {e}")
 
         if sweep_mode and effective_start_year:
-            # ── Sweep Z: t-statistic on backtest return series ────────────────
-            # compute_sweep_z measures whether mean daily excess return is
-            # significantly > 0 across the full backtest window.
-            # This varies genuinely across start years because longer windows
-            # include different market regimes with different strategy performance.
-            #
-            # The old code used compute_conviction(last_p) which computed Z as
-            # (best_p - mean_p) / std_p across 6 ETF probabilities on a single
-            # day. With 6 similar values the std is always tiny, producing the
-            # same ~1.54σ for every sweep year — pure geometry, not signal quality.
             sweep_z, sweep_conv = compute_sweep_z(strat_rets, rf_rate=rf_rate)
 
             sweep_payload = {
@@ -289,7 +345,8 @@ def run_pipeline(force_refresh: bool = False,
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="P2-ETF-REGIME-PREDICTOR Training Pipeline")
+    parser = argparse.ArgumentParser(
+        description="P2-ETF-REGIME-PREDICTOR Training Pipeline")
     parser.add_argument("--force-refresh", action="store_true")
     parser.add_argument("--local",         action="store_true")
     parser.add_argument("--wfcv-only",     action="store_true")
