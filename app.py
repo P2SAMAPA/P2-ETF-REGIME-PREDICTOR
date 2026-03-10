@@ -3,6 +3,14 @@ app.py — P2-ETF-REGIME-PREDICTOR
 ==================================
 Streamlit UI for the Wasserstein Regime-Aware ETF Rotation Model.
 
+Fixes (2026-03-10):
+  - Hero banner date now always shows the TRUE next trading day from today's
+    EST clock — not the model's stale next_date derived from pred_history.
+    When pred_history is stale (pipeline hasn't run yet), the banner correctly
+    shows tomorrow's date while a staleness warning appears below.
+  - Hero box background changed to white with coloured accent border.
+  - Audit trail shows a staleness warning when pred_history is not current.
+
 Architecture:
   - Loads pre-trained models and signals from GitLab (read-only)
   - Runs backtest on historical predictions for equity curve
@@ -48,20 +56,20 @@ try:
     from strategy import (
         execute_strategy, calculate_metrics,
         calculate_benchmark_metrics, TARGET_ETFS as STRAT_ETFS,
+        next_trading_day_from_today,
     )
     from utils import get_est_time, regime_colour, conviction_colour
 except Exception as e:
     st.error(f"❌ Import error: {e}")
     st.stop()
 
-# ── Cached loaders (prevent re-running on every widget interaction) ──────────
+# ── Cached loaders ────────────────────────────────────────────────────────────
 
 @st.cache_data(ttl=3600, show_spinner=False)
 def cached_get_data(start_year, force=False):
     return get_data(start_year=start_year, force_refresh=force)
 
 def cached_load_predictions():
-    # Not cached — must filter by start_year, caching would return stale full history
     return load_predictions_from_gitlab()
 
 @st.cache_resource(ttl=3600, show_spinner=False)
@@ -70,9 +78,6 @@ def cached_load_detector():
     if data:
         return RegimeDetector.from_bytes(data)
     return None
-
-@st.cache_resource(ttl=3600, show_spinner=False)
-
 
 @st.cache_data(ttl=3600, show_spinner=False)
 def cached_load_feature_list():
@@ -124,7 +129,7 @@ with st.sidebar:
 
     st.subheader("📊 Display")
     benchmark = st.selectbox("Benchmark", ["SPY", "AGG", "None"])
-    use_momentum = True  # Momentum (Option B) — sole ranking method
+    use_momentum = True
     st.divider()
     st.subheader("📊 Backtest Mode")
     bt_mode = st.radio(
@@ -142,7 +147,7 @@ with st.sidebar:
     use_wf = "Walk-Forward" in bt_mode
 
     st.divider()
-    run_btn = st.button("🚀 Run Model", type="primary", use_container_width=True)
+    run_btn     = st.button("🚀 Run Model", type="primary", use_container_width=True)
     refresh_btn = st.button("🔄 Force Data Refresh", use_container_width=True)
 
 # ── Main panel ────────────────────────────────────────────────────────────────
@@ -246,11 +251,8 @@ def _load_sweep_cache(date_str, _bust=0):
 def _load_sweep_any(_bust=0):
     """
     Load the most recent sweep result for EACH year independently.
-    Fix: old version picked ONE global best_date — if year 2013 only had
-    a 20260307 file but best_date was 20260308, it returned nothing for 2013.
-    New version: per-year independent date lookup — always shows latest per year.
-    Returns (found_dict, display_date) where display_date is the most
-    recent date seen across any year.
+    Per-year independent date lookup — always shows latest per year.
+    Returns (found_dict, display_date).
     """
     found, best_date = {}, None
     try:
@@ -269,7 +271,6 @@ def _load_sweep_any(_bust=0):
         if r.status_code != 200:
             return found, best_date
 
-        # Build per-year most-recent-date map
         year_best = {}
         for item in r.json():
             name = item.get("name", "")
@@ -284,7 +285,6 @@ def _load_sweep_any(_bust=0):
                     except Exception:
                         pass
 
-        # Fetch most recent file per year independently
         for yr in SWEEP_YEARS:
             if yr not in year_best:
                 continue
@@ -367,7 +367,7 @@ tab1, tab2 = st.tabs(["📊 Single-Year Results", "🔄 Multi-Year Consensus Swe
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# TAB 2 — Multi-Year Consensus Sweep (rendered BEFORE tab1 to avoid st.stop())
+# TAB 2 — Multi-Year Consensus Sweep
 # ═══════════════════════════════════════════════════════════════════════════════
 with tab2:
     st.subheader("🔄 Multi-Year Consensus Sweep")
@@ -388,13 +388,7 @@ with tab2:
     today_cache          = _load_sweep_cache(today_str, _bust=st.session_state.sweep_bust)
     all_cache, best_date = _load_sweep_any(_bust=st.session_state.sweep_bust)
 
-    # prev_cache = years that have ANY result but were NOT run today
-    # This replaces the old "wipe prev_cache if prev_date == today" logic which
-    # caused 2013/2015 to disappear when some years ran today and some hadn't yet
-    prev_cache = {yr: v for yr, v in all_cache.items() if yr not in today_cache}
-
-    # Merged display: today takes priority, fill gaps with prev
-    # Ensures consensus uses ALL 6 years, not just the 4 that ran today
+    prev_cache    = {yr: v for yr, v in all_cache.items() if yr not in today_cache}
     display_cache = {**prev_cache, **today_cache}
     display_date  = today_sw if today_cache else best_date
 
@@ -407,7 +401,6 @@ with tab2:
             "Today's sweep hasn't run for these yet.", icon="📅"
         )
 
-    # Status grid — per-year today vs prev vs not run
     _cols = st.columns(len(SWEEP_YEARS))
     for _i, _yr in enumerate(SWEEP_YEARS):
         with _cols[_i]:
@@ -420,7 +413,6 @@ with tab2:
     st.caption("✅ today · 📅 previous · ⏳ not run")
     st.divider()
 
-    # Run button
     _missing      = [y for y in SWEEP_YEARS if y not in today_cache]
     _force_rerun  = st.checkbox("🔄 Force re-run all years", value=False,
                                 help="Re-trains even if today\'s results already exist")
@@ -586,9 +578,11 @@ with tab2:
                                    .hide(axis="index"),
                          use_container_width=True, height=280)
 
+# ═══════════════════════════════════════════════════════════════════════════════
+# TAB 1 — Single-Year Results
+# ═══════════════════════════════════════════════════════════════════════════════
 with tab1:
     if not run_btn:
-        # Landing state
         col1, col2, col3 = st.columns(3)
         with col1:
             st.info("**Step 1** — Configure risk controls in the sidebar")
@@ -598,9 +592,7 @@ with tab1:
             st.info("**Step 3** — Review signal, regime, and audit trail")
         st.stop()
 
-
-    # ── Load data ─────────────────────────────────────────────────────────────────
-    # ── Data loading ─────────────────────────────────────────────────────────────
+    # ── Load data ─────────────────────────────────────────────────────────────
     with st.spinner("📥 Loading dataset from GitLab..."):
         try:
             df = cached_get_data(start_year)
@@ -610,9 +602,7 @@ with tab1:
             st.error(f"❌ Data load failed: {e}")
             st.stop()
 
-    # ── Refresh button handler ───────────────────────────────────────────────────
-
-    # ── Load models from GitLab ───────────────────────────────────────────────────
+    # ── Load models ───────────────────────────────────────────────────────────
     with st.spinner("🧠 Loading models from GitLab..."):
         detector = cached_load_detector()
 
@@ -622,7 +612,6 @@ with tab1:
             st.warning("⚠️ Regime detector not found — run pipeline first")
 
         if use_momentum:
-            # Layer 2B — Momentum
             mom_bytes = load_momentum_ranker_from_gitlab()
             if mom_bytes:
                 momentum_ranker = MomentumRanker.from_bytes(mom_bytes)
@@ -635,7 +624,7 @@ with tab1:
         st.error("Models not available. Trigger Manual Retrain in GitHub Actions first.")
         st.stop()
 
-    # ── Risk-free rate ─────────────────────────────────────────────────────────────
+    # ── Risk-free rate ─────────────────────────────────────────────────────────
     rf_rate  = 0.045
     rf_label = "fallback 4.5%"
     try:
@@ -650,7 +639,7 @@ with tab1:
             rf_label = "dataset DTB3"
     st.caption(f"📊 Risk-free rate (3M T-Bill): **{rf_rate*100:.2f}%** — {rf_label}")
 
-    # ── Regime detection + feature prep ──────────────────────────────────────────
+    # ── Regime detection ──────────────────────────────────────────────────────
     with st.spinner("🔍 Applying regime labels..."):
         try:
             df = detector.add_regime_to_df(df)
@@ -661,13 +650,12 @@ with tab1:
             df["Regime"]      = 0
             df["Regime_Name"] = "Global"
 
-        # Get current regime
         try:
             regime_int, regime_name = detector.get_current_regime(df)
         except Exception:
             regime_int, regime_name = 0, "Unknown"
 
-    # ── Generate prediction history ───────────────────────────────────────────────
+    # ── Load predictions ──────────────────────────────────────────────────────
     with st.spinner("📡 Loading predictions from GitLab..."):
         try:
             if use_wf:
@@ -693,18 +681,15 @@ with tab1:
             st.error(f"❌ Prediction load failed: {e}")
             st.stop()
 
-    # ── Execute strategy ──────────────────────────────────────────────────────────
+    # ── Execute strategy ──────────────────────────────────────────────────────
     with st.spinner("📊 Running backtest..."):
-        # Daily return columns
         ret_cols   = [f"{t}_Ret" for t in TARGET_ETFS if f"{t}_Ret" in df.columns]
         daily_rets = df[ret_cols]
         regime_ser = df["Regime_Name"] if "Regime_Name" in df.columns else None
 
         try:
-            # Filter to start_year for backtest — pred_history covers full history
             cutoff = pd.Timestamp(f"{start_year}-01-01")
 
-            # Ensure index is DatetimeIndex for filtering
             if not isinstance(pred_history.index, pd.DatetimeIndex):
                 pred_history.index = pd.to_datetime(pred_history.index)
             if not isinstance(daily_rets.index, pd.DatetimeIndex):
@@ -712,12 +697,12 @@ with tab1:
 
             pred_bt = pred_history[pred_history.index >= cutoff]
             rets_bt = daily_rets[daily_rets.index >= cutoff]
-            reg_bt  = regime_ser[regime_ser.index >= cutoff]                   if regime_ser is not None else None
+            reg_bt  = regime_ser[regime_ser.index >= cutoff] if regime_ser is not None else None
 
             st.caption(f"Backtest period: {pred_bt.index[0].date()} → "
                        f"{pred_bt.index[-1].date()} ({len(pred_bt):,} days)")
 
-            (strat_rets, audit_trail, next_date, next_signal,
+            (strat_rets, audit_trail, _model_next_date, next_signal,
              conviction_z, conviction_label, last_p) = execute_strategy(
                 predictions_df = pred_bt,
                 daily_ret_df   = rets_bt,
@@ -728,43 +713,68 @@ with tab1:
                 regime_series  = reg_bt,
             )
             metrics = calculate_metrics(strat_rets, rf_rate=rf_rate)
+
         except Exception as e:
             st.error(f"❌ Backtest failed: {e}")
             st.stop()
 
-    # ═════════════════════════════════════════════════════════════════════════════
-    # SIGNAL BANNER
-    # ═════════════════════════════════════════════════════════════════════════════
+    # ── Compute TRUE next trading day from today's clock ──────────────────────
+    # The model's _model_next_date is derived from the last date in pred_history.
+    # If the pipeline hasn't run today, pred_history may be stale (e.g. last
+    # date = Mar 06 → model says next = Mar 09). We always show the ACTUAL
+    # next trading day from today's EST clock so the banner date is correct.
+    true_next_date = next_trading_day_from_today()
+
+    # Warn if pred_history is stale (more than 1 trading day behind today)
+    pred_last_date = pred_bt.index[-1].date()
+    from datetime import date as _date
+    today_est_date = _today_est()
+    days_stale = (today_est_date - pred_last_date).days
+    if days_stale > 1:
+        st.warning(
+            f"⚠️ **Predictions are stale** — last update: **{pred_last_date}** "
+            f"({days_stale} calendar days ago). "
+            "The signal shown is based on the most recent available data. "
+            "Click **🔄 Force Data Refresh** in the sidebar to trigger a new pipeline run.",
+            icon="📅"
+        )
+
+    # ═════════════════════════════════════════════════════════════════════════
+    # SIGNAL BANNER — white background, coloured accent
+    # ═════════════════════════════════════════════════════════════════════════
     st.divider()
     regime_col = regime_colour(regime_name)
     conv_col   = conviction_colour(conviction_label)
 
-    banner_bg = ("#1a3a1a" if conviction_label in ("High", "Very High")
-                 else "#3a2a1a" if conviction_label == "Moderate"
-                 else "#2a1a1a")
+    # Accent colour for the left border based on conviction
+    accent_col = ("#16a34a" if conviction_label in ("High", "Very High")
+                  else "#d97706" if conviction_label == "Moderate"
+                  else "#dc2626")
 
     st.markdown(f"""
-    <div style="background:{banner_bg};border-radius:12px;padding:24px 32px;
-                margin-bottom:16px;border:1px solid #333;">
-      <div style="display:flex;justify-content:space-between;align-items:center;
-                  flex-wrap:wrap;gap:16px;">
+    <div style="background:#ffffff; border-radius:12px; padding:24px 32px;
+                margin-bottom:16px; border:1px solid #e2e8f0;
+                border-left:6px solid {accent_col};
+                box-shadow:0 2px 8px rgba(0,0,0,0.06);">
+      <div style="display:flex; justify-content:space-between; align-items:center;
+                  flex-wrap:wrap; gap:16px;">
         <div>
-          <div style="color:#888;font-size:13px;margin-bottom:4px;">
-            NEXT TRADING DAY SIGNAL — {next_date.strftime('%A %b %d, %Y')}
+          <div style="color:#6b7280; font-size:13px; margin-bottom:4px;">
+            NEXT TRADING DAY SIGNAL — {true_next_date.strftime('%A %b %d, %Y')}
           </div>
-          <div style="font-size:42px;font-weight:800;color:#ffffff;
+          <div style="font-size:42px; font-weight:800; color:#111827;
                       letter-spacing:2px;">{next_signal}</div>
-          <div style="color:#aaa;font-size:13px;margin-top:4px;">
-            Conviction: <span style="color:{conv_col};font-weight:600;">
+          <div style="color:#6b7280; font-size:13px; margin-top:4px;">
+            Conviction: <span style="color:{conv_col}; font-weight:600;">
             {conviction_label}</span> &nbsp;|&nbsp; Z = {conviction_z:+.2f}σ
           </div>
         </div>
         <div style="text-align:right;">
-          <div style="color:#888;font-size:13px;margin-bottom:4px;">
+          <div style="color:#6b7280; font-size:13px; margin-bottom:4px;">
             CURRENT REGIME</div>
-          <div style="background:{regime_col}22;border:1px solid {regime_col};
-                      border-radius:8px;padding:8px 20px;display:inline-block;">
-            <span style="color:{regime_col};font-size:20px;font-weight:700;">
+          <div style="background:{regime_col}18; border:1px solid {regime_col};
+                      border-radius:8px; padding:8px 20px; display:inline-block;">
+            <span style="color:{regime_col}; font-size:20px; font-weight:700;">
             {regime_name}</span>
           </div>
         </div>
@@ -772,12 +782,11 @@ with tab1:
     </div>
     """, unsafe_allow_html=True)
 
-    # ── ETF probability bars ──────────────────────────────────────────────────────
+    # ── ETF probability bars ──────────────────────────────────────────────────
     st.subheader("P(Beat Cash) — Next 5 Days")
 
     base_rates = {t: 0.5 for t in TARGET_ETFS}
 
-    # Split into two rows for 7 ETFs
     row1_etfs = TARGET_ETFS[:4]
     row2_etfs = TARGET_ETFS[4:]
     prob_row1 = st.columns(len(row1_etfs))
@@ -796,9 +805,9 @@ with tab1:
                 delta_color="normal"
             )
 
-    # ═════════════════════════════════════════════════════════════════════════════
+    # ═════════════════════════════════════════════════════════════════════════
     # PERFORMANCE METRICS
-    # ═════════════════════════════════════════════════════════════════════════════
+    # ═════════════════════════════════════════════════════════════════════════
     st.divider()
     st.subheader("📊 Backtest Performance")
 
@@ -822,7 +831,6 @@ with tab1:
               f"{metrics.get('max_daily_dd',0)*100:.2f}%",
               delta=f"on {worst_date}")
 
-    # Secondary metrics row
     c6, c7, c8, c9, c10 = st.columns(5)
     dd_idx  = metrics.get("max_dd_idx", 0)
     dd_date = pred_bt.index[min(dd_idx, len(pred_bt)-1)].strftime("%d %b %Y")
@@ -842,9 +850,9 @@ with tab1:
                f"{metrics.get('n_days',0):,}",
                delta="Trading Days")
 
-    # ═════════════════════════════════════════════════════════════════════════════
+    # ═════════════════════════════════════════════════════════════════════════
     # EQUITY CURVE
-    # ═════════════════════════════════════════════════════════════════════════════
+    # ═════════════════════════════════════════════════════════════════════════
     st.divider()
     st.subheader("📈 Equity Curve")
 
@@ -852,8 +860,6 @@ with tab1:
     cum_rets   = metrics.get("cum_returns", np.array([]))
 
     fig = go.Figure()
-
-    # Strategy line
     fig.add_trace(go.Scatter(
         x=plot_dates, y=cum_rets,
         name="Strategy",
@@ -861,7 +867,6 @@ with tab1:
         hovertemplate="%{x|%Y-%m-%d}<br>%{y:.3f}x<extra>Strategy</extra>",
     ))
 
-    # Benchmark
     if benchmark != "None":
         bm_col = BENCHMARK_COLS.get(benchmark)
         if bm_col and bm_col in df.columns:
@@ -876,7 +881,6 @@ with tab1:
                     hovertemplate=f"%{{x|%Y-%m-%d}}<br>%{{y:.3f}}x<extra>{benchmark}</extra>",
                 ))
 
-    # Drawdown shading
     cum_max = metrics.get("cum_max", cum_rets)
     fig.add_trace(go.Scatter(
         x=np.concatenate([plot_dates, plot_dates[::-1]]),
@@ -902,9 +906,9 @@ with tab1:
     )
     st.plotly_chart(fig, use_container_width=True)
 
-    # ═════════════════════════════════════════════════════════════════════════════
+    # ═════════════════════════════════════════════════════════════════════════
     # REGIME TIMELINE
-    # ═════════════════════════════════════════════════════════════════════════════
+    # ═════════════════════════════════════════════════════════════════════════
     if "Regime_Name" in df.columns:
         st.divider()
         st.subheader("🗺️ Market Regime Timeline")
@@ -940,16 +944,21 @@ with tab1:
         )
         st.plotly_chart(fig_r, use_container_width=True)
 
-    # ═════════════════════════════════════════════════════════════════════════════
+    # ═════════════════════════════════════════════════════════════════════════
     # AUDIT TRAIL
-    # ═════════════════════════════════════════════════════════════════════════════
+    # ═════════════════════════════════════════════════════════════════════════
     st.divider()
     st.subheader("📋 Audit Trail — Last 30 Trading Days")
+
+    if days_stale > 1:
+        st.caption(
+            f"⚠️ Showing data through **{pred_last_date}** — pipeline hasn't run since then. "
+            "Rows up to today will appear once the next pipeline run completes."
+        )
 
     if audit_trail:
         audit_df = pd.DataFrame(audit_trail).tail(30)
 
-        # Colour-code Signal column
         def style_signal(val):
             if val == "CASH":
                 return "color: #888888"
@@ -967,7 +976,6 @@ with tab1:
             except Exception:
                 return ""
 
-        # Reorder columns for readability — only include columns that exist
         priority = ["Date", "Signal", "Top_Pick", "Regime", "Conviction_Z",
                     "P_Top", "Signal_Ret%",
                     "TLT_Ret%", "VNQ_Ret%", "SLV_Ret%", "GLD_Ret%",
@@ -975,7 +983,6 @@ with tab1:
                     "Stop_Active", "Rotated", "Disagree"]
         audit_df = audit_df[[c for c in priority if c in audit_df.columns]]
 
-        # Format numbers
         fmt = {}
         for col in audit_df.columns:
             if col == "Conviction_Z":
@@ -985,7 +992,6 @@ with tab1:
             elif col.endswith("_Ret%") or col == "Signal_Ret%":
                 fmt[col] = "{:+.3f}%"
 
-        # Safe display without complex styling that can KeyError
         st.dataframe(
             audit_df.style.format(fmt, na_rep="—"),
             use_container_width=True,
@@ -994,9 +1000,9 @@ with tab1:
     else:
         st.info("No audit trail available yet.")
 
-    # ═════════════════════════════════════════════════════════════════════════════
+    # ═════════════════════════════════════════════════════════════════════════
     # FEATURE IMPORTANCE / MOMENTUM WEIGHTS
-    # ═════════════════════════════════════════════════════════════════════════════
+    # ═════════════════════════════════════════════════════════════════════════
     st.divider()
 
     if use_momentum:
@@ -1028,10 +1034,9 @@ with tab1:
         )
         st.plotly_chart(fig_i, use_container_width=True)
 
-
-    # ═════════════════════════════════════════════════════════════════════════════
+    # ═════════════════════════════════════════════════════════════════════════
     # SIGNALS HISTORY
-    # ═════════════════════════════════════════════════════════════════════════════
+    # ═════════════════════════════════════════════════════════════════════════
     st.divider()
     st.subheader("📡 Signal History (from GitLab)")
 
@@ -1045,9 +1050,9 @@ with tab1:
     except Exception as e:
         st.info(f"Could not load signal history: {e}")
 
-    # ═════════════════════════════════════════════════════════════════════════════
+    # ═════════════════════════════════════════════════════════════════════════
     # METHODOLOGY
-    # ═════════════════════════════════════════════════════════════════════════════
+    # ═════════════════════════════════════════════════════════════════════════
     st.divider()
     with st.expander("📖 Methodology", expanded=False):
         st.markdown(f"""
@@ -1071,8 +1076,7 @@ with tab1:
 
     <h4 style="color:#00d1b2;">📈 Layer 2 — Momentum Ranking</h4>
     <p>A pure rules-based composite momentum score ranks all 6 ETFs each day.
-    The top-ranked ETF with sufficient conviction (Z ≥ threshold) is selected.
-    No ML — fully transparent and interpretable.</p>
+    The top-ranked ETF with sufficient conviction (Z ≥ threshold) is selected.</p>
     <ul>
       <li><b>Rate-of-Change (RoC):</b> 40% × 5d + 30% × 10d + 20% × 21d + 10% × 63d</li>
       <li><b>OBV accumulation:</b> 15% weight — volume-weighted momentum confirmation</li>
@@ -1080,26 +1084,12 @@ with tab1:
       <li>Scores Z-normalised cross-sectionally across all 6 ETFs each day</li>
     </ul>
 
-    <h4 style="color:#00d1b2;">📊 Input Features</h4>
-    <p>FRED macro signals used for regime detection only:</p>
-    <ul>
-      <li><b>FRED macro:</b> DGS10, T10Y2Y, T10Y3M, DTB3, MORTGAGE30US, VIXCLS,
-          DTWEXBGS, DCOILWTICO, BAMLC0A0CM, BAMLH0A0HYM2, UMCSENT, T10YIE</li>
-      <li><b>Derived macro:</b> Real yield (DGS10−T10YIE), rate momentum (20d/60d),
-          rising/falling flags, yield curve shape, inflation regime, VIX regime,
-          credit stress, rolling Z-scores (60d)</li>
-      <li><b>ETF signals:</b> Daily return, realised vol (10d/21d), momentum
-          (5d/21d/63d), volume ratio, ATR14, relative strength vs SPY</li>
-      <li><b>Regime label</b> — integer + one-hot encoded regime membership</li>
-    </ul>
-
     <h4 style="color:#00d1b2;">⚡ Strategy Execution</h4>
     <ul>
-      <li><b>Conviction gate:</b> Regime-aware Z threshold — Risk-On ≥ 1.0σ, Rate-Rising ≥ 0.5σ, Crisis/Risk-Off ≥ 0.3σ — below threshold holds CASH
+      <li><b>Conviction gate:</b> Z ≥ {DEFAULT_Z_MIN}σ required to enter — below threshold holds CASH
           earning {rf_rate*100:.2f}% annualised</li>
       <li><b>Stop-loss:</b> 2-day cumulative loss ≤ {stop_loss_pct*100:.0f}% → CASH
           until Z ≥ {z_reentry:.1f}σ</li>
-
       <li><b>Transaction cost:</b> {fee_bps}bps per one-way trade</li>
     </ul>
 
@@ -1108,6 +1098,12 @@ with tab1:
     fetch new data → detect regime → fit momentum ranker → generate signal →
     push to GitLab. Walk-forward OOS predictions refresh monthly.
     This UI is read-only — loads pre-computed signals from GitLab at runtime.</p>
+
+    <h4 style="color:#00d1b2;">📅 Banner Date Logic</h4>
+    <p>The "Next Trading Day Signal" date in the hero banner is always computed
+    from <b>today's EST clock</b>, not from the prediction history file.
+    This means the date is always correct even when the pipeline is behind.
+    A staleness warning appears when pred_history is more than 1 day old.</p>
 
     <h4 style="color:#ff6b6b;">⚠️ Important Caveats</h4>
     <ul>
