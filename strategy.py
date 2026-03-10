@@ -116,6 +116,11 @@ def execute_strategy(
     Note: conviction_z / conviction_label returned here are cross-sectional
     (from the last day's p_array). For sweep quality metrics, use
     compute_sweep_z(strat_rets) after calling this function.
+
+    next_date is computed as the next NYSE trading day after the last date
+    in predictions_df. This is the date shown in the hero signal banner.
+    The caller (app.py) overrides this with the true next trading day from
+    today's date when pred_history may be stale — see _next_trading_day_from_today().
     """
     daily_rf      = rf_rate / 252
     now_est       = datetime.now(_EST)
@@ -375,3 +380,20 @@ def _next_trading_day(last_date: pd.Timestamp) -> pd.Timestamp:
     while nxt.weekday() >= 5:
         nxt += pd.Timedelta(days=1)
     return nxt
+
+
+def next_trading_day_from_today() -> pd.Timestamp:
+    """
+    Return the next NYSE trading day from TODAY (EST clock).
+    Used by app.py to override the model's next_date when pred_history
+    may be stale (e.g. pipeline hasn't run yet today).
+
+    Logic:
+      - If market is still open today (EST < 16:00) → next trading day = tomorrow+
+      - If market has closed today (EST >= 16:00) → next trading day = tomorrow+
+      In both cases we want the next trading day AFTER today, since the signal
+      is for the next open.
+    """
+    now_est = datetime.now(_EST)
+    today_ts = pd.Timestamp(now_est.date())
+    return _next_trading_day(today_ts)
