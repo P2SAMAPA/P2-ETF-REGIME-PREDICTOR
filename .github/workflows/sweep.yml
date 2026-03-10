@@ -1,15 +1,16 @@
 # sweep.yml
 # Multi-Year Consensus Sweep — 6 parallel jobs, one per start year
 # Auto-runs daily at 8pm EST (01:00 UTC Tue-Sat)
-# Wipes previous day's sweep files at 7pm EST (00:00 UTC)
+# Cleans stale files at 9pm EST (02:00 UTC) — AFTER the sweep completes,
+# keeping only the single most-recent date-stamped file per year.
 # Can also be triggered manually from app.py or GitHub Actions UI
 
 name: Multi-Year Consensus Sweep
 
 on:
   schedule:
-    - cron: "0 1 * * 2-6"    # 01:00 UTC = 8pm EST Mon-Fri (run all 6 sweeps)
-    - cron: "0 0 * * 2-6"    # 00:00 UTC = 7pm EST Mon-Fri (wipe stale cache)
+    - cron: "0 1 * * 2-6"    # 01:00 UTC = 8pm EST Mon-Fri  → run all 6 sweeps
+    - cron: "0 2 * * 2-6"    # 02:00 UTC = 9pm EST Mon-Fri  → cleanup stale files
   workflow_dispatch:
     inputs:
       sweep_years:
@@ -17,49 +18,104 @@ on:
         required: false
         default: "2008,2013,2015,2017,2019,2021"
 
-# ── 7pm EST: wipe previous day's sweep files from GitLab ──────────────────────
+# ── 9pm EST: clean stale sweep files — keep only latest per year ──────────────
+# Changed from 7pm (before sweep) to 9pm (after sweep) so we never wipe
+# the previous day's files before today's have been written, which was
+# causing accumulation across multiple dates in GitLab.
+#
+# Logic: for each sweep year, find ALL date-stamped files, keep only
+# the one with the most recent date, delete the rest.
+# This is date-agnostic — it doesn't hardcode "today" — so it correctly
+# handles weekends, holidays, and pipeline delays.
 jobs:
-  wipe_stale_sweep:
+  cleanup_stale_sweep:
     if: >
       github.event_name == 'schedule' &&
-      github.event.schedule == '0 0 * * 2-6'
+      github.event.schedule == '0 2 * * 2-6'
     runs-on: ubuntu-latest
     timeout-minutes: 10
     env:
       GITLAB_API_TOKEN: ${{ secrets.GITLAB_API_TOKEN }}
       GITLAB_REPO_URL:  ${{ secrets.GITLAB_REPO_URL }}
     steps:
-      - name: Wipe stale sweep files
+      - name: Keep only latest date-stamped file per sweep year
         run: |
           pip install requests -q
           python3 - <<'PYEOF'
           import os, re, requests
-          from datetime import datetime, timezone, timedelta
+          from datetime import datetime
+
           gl_token = os.environ["GITLAB_API_TOKEN"]
           gl_url   = os.environ["GITLAB_REPO_URL"]
-          match    = re.search(r"projects/([^/?]+)", gl_url)
-          proj     = match.group(1) if match else None
-          gl_base  = gl_url.split("/api/")[0] if "/api/" in gl_url else "https://gitlab.com"
-          today    = (datetime.now(timezone.utc) - timedelta(hours=5)).strftime("%Y%m%d")
-          headers  = {"PRIVATE-TOKEN": gl_token}
-          r = requests.get(f"{gl_base}/api/v4/projects/{proj}/repository/tree"
-                           f"?path=data&per_page=100&ref=main", headers=headers, timeout=10)
-          deleted = 0
-          for item in (r.json() if r.status_code == 200 else []):
-              name = item.get("name","")
+
+          # Extract project ID from URL
+          match = re.search(r"projects/([^/?]+)", gl_url)
+          proj  = match.group(1) if match else None
+          if not proj:
+              # Fallback: derive from repo URL pattern
+              proj = "P2SAMAPA%2Fp2-etf-regime-predictor"
+          gl_base = gl_url.split("/api/")[0] if "/api/" in gl_url else "https://gitlab.com"
+
+          headers = {"PRIVATE-TOKEN": gl_token}
+
+          # ── List all files in data/ ────────────────────────────────────────
+          r = requests.get(
+              f"{gl_base}/api/v4/projects/{proj}/repository/tree"
+              f"?path=data&per_page=100&ref=main",
+              headers=headers, timeout=10,
+          )
+          if r.status_code != 200:
+              print(f"Could not list repo tree: {r.status_code}")
+              exit(0)
+
+          # ── Group sweep files by year ──────────────────────────────────────
+          # Pattern: sweep_{year}_{YYYYMMDD}.json
+          from collections import defaultdict
+          year_files = defaultdict(list)   # year → [(date, filename)]
+
+          for item in r.json():
+              name = item.get("name", "")
               if name.startswith("sweep_") and name.endswith(".json"):
-                  parts = name.replace(".json","").split("_")
-                  if len(parts) == 3 and parts[2] != today:
-                      fpath = f"data%2F{name}"
-                      dr = requests.delete(
-                          f"{gl_base}/api/v4/projects/{proj}/repository/files/{fpath}",
-                          headers=headers,
-                          json={"branch":"main","commit_message":f"Wipe stale sweep: {name}"},
-                          timeout=10,
-                      )
-                      if dr.status_code == 204:
-                          print(f"Deleted {name}"); deleted += 1
-          print(f"Wiped {deleted} stale sweep file(s)")
+                  parts = name.replace(".json", "").split("_")
+                  if len(parts) == 3:
+                      try:
+                          yr_int   = int(parts[1])
+                          dt       = datetime.strptime(parts[2], "%Y%m%d").date()
+                          year_files[yr_int].append((dt, name))
+                      except Exception:
+                          pass
+
+          # ── For each year: keep newest, delete the rest ────────────────────
+          total_deleted = 0
+          for yr, entries in year_files.items():
+              if len(entries) <= 1:
+                  continue   # nothing to clean up for this year
+
+              # Sort descending by date — first entry is the one to keep
+              entries.sort(key=lambda x: x[0], reverse=True)
+              keep_name  = entries[0][1]
+              to_delete  = [name for _, name in entries[1:]]
+
+              print(f"Year {yr}: keeping {keep_name}, deleting {len(to_delete)} old file(s)")
+
+              for old_name in to_delete:
+                  fpath = f"data%2F{old_name}"
+                  dr = requests.delete(
+                      f"{gl_base}/api/v4/projects/{proj}/repository/files/{fpath}",
+                      headers=headers,
+                      json={
+                          "branch": "main",
+                          "commit_message": f"[auto] Cleanup old sweep: {old_name}",
+                      },
+                      timeout=10,
+                  )
+                  if dr.status_code == 204:
+                      print(f"  ✅ Deleted {old_name}")
+                      total_deleted += 1
+                  else:
+                      print(f"  ⚠️ Could not delete {old_name}: {dr.status_code}")
+
+          print(f"\nCleanup complete — deleted {total_deleted} stale file(s) total")
           PYEOF
 
   # ── Sweep jobs (parallel, one per start year) ──────────────────────────────
