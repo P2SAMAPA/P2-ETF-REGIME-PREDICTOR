@@ -123,6 +123,11 @@ def run_pipeline(force_refresh: bool = False,
         results["optimal_k"]    = detector.optimal_k_
         results["regime_names"] = detector.regime_names_
 
+    # FIX: Drop existing Regime columns before adding new ones
+    if "Regime" in df.columns:
+        df = df.drop(columns=["Regime", "Regime_Name"])
+        log.info("  Dropped existing Regime columns before re-detection")
+
     try:
         df = detector.add_regime_to_df(df)
     except Exception as e:
