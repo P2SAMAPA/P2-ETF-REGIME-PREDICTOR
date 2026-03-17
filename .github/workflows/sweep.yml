@@ -1,15 +1,13 @@
 # sweep.yml
-# Multi-Year Consensus Sweep — 6 parallel jobs, one per start year
+# Multi-Year Consensus Sweep — 6 sequential jobs (one per start year)
 # Auto-runs daily at 8pm EST (01:00 UTC Tue-Sat)
-# Cleans stale files at 9pm EST (02:00 UTC) — AFTER the sweep completes,
-# keeping only the single most-recent date-stamped file per year.
-# Can also be triggered manually from app.py or GitHub Actions UI
+# Cleans stale files at 9pm EST (02:00 UTC) — AFTER the sweep completes
 
 name: Multi-Year Consensus Sweep
 
 on:
   schedule:
-    - cron: "0 1 * * 2-6"    # 01:00 UTC = 8pm EST Mon-Fri  → run all 6 sweeps
+    - cron: "0 1 * * 2-6"    # 01:00 UTC = 8pm EST Mon-Fri  → run all 6 sweeps sequentially
     - cron: "0 2 * * 2-6"    # 02:00 UTC = 9pm EST Mon-Fri  → cleanup stale files
   workflow_dispatch:
     inputs:
@@ -18,16 +16,8 @@ on:
         required: false
         default: "2008,2013,2015,2017,2019,2021"
 
-# ── 9pm EST: clean stale sweep files — keep only latest per year ──────────────
-# Changed from 7pm (before sweep) to 9pm (after sweep) so we never wipe
-# the previous day's files before today's have been written, which was
-# causing accumulation across multiple dates in GitLab.
-#
-# Logic: for each sweep year, find ALL date-stamped files, keep only
-# the one with the most recent date, delete the rest.
-# This is date-agnostic — it doesn't hardcode "today" — so it correctly
-# handles weekends, holidays, and pipeline delays.
 jobs:
+  # ── 9pm EST: clean stale sweep files — keep only latest per year ──────────────
   cleanup_stale_sweep:
     if: >
       github.event_name == 'schedule' &&
@@ -52,13 +42,12 @@ jobs:
           match = re.search(r"projects/([^/?]+)", gl_url)
           proj  = match.group(1) if match else None
           if not proj:
-              # Fallback: derive from repo URL pattern
               proj = "P2SAMAPA%2Fp2-etf-regime-predictor"
           gl_base = gl_url.split("/api/")[0] if "/api/" in gl_url else "https://gitlab.com"
 
           headers = {"PRIVATE-TOKEN": gl_token}
 
-          # ── List all files in data/ ────────────────────────────────────────
+          # List all files in data/
           r = requests.get(
               f"{gl_base}/api/v4/projects/{proj}/repository/tree"
               f"?path=data&per_page=100&ref=main",
@@ -68,10 +57,9 @@ jobs:
               print(f"Could not list repo tree: {r.status_code}")
               exit(0)
 
-          # ── Group sweep files by year ──────────────────────────────────────
-          # Pattern: sweep_{year}_{YYYYMMDD}.json
+          # Group sweep files by year
           from collections import defaultdict
-          year_files = defaultdict(list)   # year → [(date, filename)]
+          year_files = defaultdict(list)
 
           for item in r.json():
               name = item.get("name", "")
@@ -85,13 +73,12 @@ jobs:
                       except Exception:
                           pass
 
-          # ── For each year: keep newest, delete the rest ────────────────────
+          # For each year: keep newest, delete the rest
           total_deleted = 0
           for yr, entries in year_files.items():
               if len(entries) <= 1:
-                  continue   # nothing to clean up for this year
+                  continue
 
-              # Sort descending by date — first entry is the one to keep
               entries.sort(key=lambda x: x[0], reverse=True)
               keep_name  = entries[0][1]
               to_delete  = [name for _, name in entries[1:]]
@@ -118,7 +105,7 @@ jobs:
           print(f"\nCleanup complete — deleted {total_deleted} stale file(s) total")
           PYEOF
 
-  # ── Sweep jobs (parallel, one per start year) ──────────────────────────────
+  # ── Sweep jobs (SEQUENTIAL using needs:) ────────────────────────────────────
   sweep_2008:
     if: >
       (github.event_name == 'schedule' && github.event.schedule == '0 1 * * 2-6') ||
@@ -137,6 +124,7 @@ jobs:
       - run: python train.py --sweep-mode --start-year 2008
 
   sweep_2013:
+    needs: sweep_2008    # ← waits for 2008 to finish
     if: >
       (github.event_name == 'schedule' && github.event.schedule == '0 1 * * 2-6') ||
       (github.event_name == 'workflow_dispatch' && contains(github.event.inputs.sweep_years, '2013'))
@@ -154,6 +142,7 @@ jobs:
       - run: python train.py --sweep-mode --start-year 2013
 
   sweep_2015:
+    needs: sweep_2013    # ← waits for 2013 to finish
     if: >
       (github.event_name == 'schedule' && github.event.schedule == '0 1 * * 2-6') ||
       (github.event_name == 'workflow_dispatch' && contains(github.event.inputs.sweep_years, '2015'))
@@ -171,6 +160,7 @@ jobs:
       - run: python train.py --sweep-mode --start-year 2015
 
   sweep_2017:
+    needs: sweep_2015    # ← waits for 2015 to finish
     if: >
       (github.event_name == 'schedule' && github.event.schedule == '0 1 * * 2-6') ||
       (github.event_name == 'workflow_dispatch' && contains(github.event.inputs.sweep_years, '2017'))
@@ -188,6 +178,7 @@ jobs:
       - run: python train.py --sweep-mode --start-year 2017
 
   sweep_2019:
+    needs: sweep_2017    # ← waits for 2017 to finish
     if: >
       (github.event_name == 'schedule' && github.event.schedule == '0 1 * * 2-6') ||
       (github.event_name == 'workflow_dispatch' && contains(github.event.inputs.sweep_years, '2019'))
@@ -205,6 +196,7 @@ jobs:
       - run: python train.py --sweep-mode --start-year 2019
 
   sweep_2021:
+    needs: sweep_2019    # ← waits for 2019 to finish
     if: >
       (github.event_name == 'schedule' && github.event.schedule == '0 1 * * 2-6') ||
       (github.event_name == 'workflow_dispatch' && contains(github.event.inputs.sweep_years, '2021'))
