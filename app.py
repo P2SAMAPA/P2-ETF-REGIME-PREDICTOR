@@ -11,8 +11,12 @@ Fixes (2026-03-10):
   - Hero box background changed to white with coloured accent border.
   - Audit trail shows a staleness warning when pred_history is not current.
 
+Migration (2026-03-19):
+  - Migrated from GitLab to Hugging Face Dataset for model storage
+  - Uses huggingface_hub for file downloads
+
 Architecture:
-  - Loads pre-trained models and signals from GitLab (read-only)
+  - Loads pre-trained models and signals from Hugging Face Dataset (read-only)
   - Runs backtest on historical predictions for equity curve
   - Displays next-day signal, regime, conviction, and audit trail
   - No training happens in the UI — all compute is in GitHub Actions
@@ -32,6 +36,7 @@ import plotly.graph_objects as go
 from datetime import datetime
 import pickle
 import io
+import os
 
 # ── Page config ───────────────────────────────────────────────────────────────
 st.set_page_config(
@@ -41,14 +46,18 @@ st.set_page_config(
     initial_sidebar_state="expanded",
 )
 
+# ── Hugging Face Dataset Configuration ───────────────────────────────────────
+HF_DATASET_REPO = os.environ.get("HF_DATASET_REPO", "P2SAMAPA/p2-etf-regime-predictor")
+HF_TOKEN = os.environ.get("HF_TOKEN", None)  # Optional: for private datasets
+
 # ── Imports ───────────────────────────────────────────────────────────────────
 try:
     from data_manager import (
         get_data, build_forward_targets,
-        load_signals_from_gitlab, load_model_from_gitlab,
-        load_feature_list_from_gitlab, load_predictions_from_gitlab,
-        load_momentum_ranker_from_gitlab, load_momentum_predictions_from_gitlab,
-        load_wf_momentum_predictions_from_gitlab, load_wf_ensemble_predictions_from_gitlab,
+        load_signals_from_hf, load_model_from_hf,
+        load_feature_list_from_hf, load_predictions_from_hf,
+        load_momentum_ranker_from_hf, load_momentum_predictions_from_hf,
+        load_wf_momentum_predictions_from_hf, load_wf_ensemble_predictions_from_hf,
         TARGET_ETFS,
     )
     from regime_detection import RegimeDetector
@@ -70,22 +79,22 @@ def cached_get_data(start_year, force=False):
     return get_data(start_year=start_year, force_refresh=force)
 
 def cached_load_predictions():
-    return load_predictions_from_gitlab()
+    return load_predictions_from_hf()
 
 @st.cache_resource(ttl=3600, show_spinner=False)
 def cached_load_detector():
-    data = load_model_from_gitlab("regime_detector.pkl")
+    data = load_model_from_hf("regime_detector.pkl")
     if data:
         return RegimeDetector.from_bytes(data)
     return None
 
 @st.cache_data(ttl=3600, show_spinner=False)
 def cached_load_feature_list():
-    return load_feature_list_from_gitlab()
+    return load_feature_list_from_hf()
 
 @st.cache_data(ttl=3600, show_spinner=False)
 def cached_load_signals():
-    return load_signals_from_gitlab()
+    return load_signals_from_hf()
 
 # ── Constants ─────────────────────────────────────────────────────────────────
 BENCHMARK_COLS = {"SPY": "SPY_Ret", "AGG": "AGG_Ret"}
@@ -225,24 +234,23 @@ def _load_sweep_cache(date_str, _bust=0):
     """Load sweep files specifically dated today (date_str = YYYYMMDD)."""
     cache = {}
     try:
+        from huggingface_hub import hf_hub_download
         import requests as _req
-        gl_token = _os_sw.environ.get("GITLAB_API_TOKEN", "")
-        if not gl_token:
-            return cache
-        proj    = "P2SAMAPA%2Fp2-etf-regime-predictor"
-        gl_base = "https://gitlab.com"
-        headers = {"PRIVATE-TOKEN": gl_token}
+        
         for yr in SWEEP_YEARS:
-            fname = f"data%2Fsweep_{yr}_{date_str}.json"
-            r = _req.get(
-                f"{gl_base}/api/v4/projects/{proj}/repository/files/{fname}/raw?ref=main",
-                headers=headers, timeout=10,
-            )
-            if r.status_code == 200:
-                try:
-                    cache[yr] = r.json()
-                except Exception:
-                    pass
+            fname = f"data/sweep_{yr}_{date_str}.json"
+            try:
+                file_path = hf_hub_download(
+                    repo_id=HF_DATASET_REPO,
+                    filename=fname,
+                    repo_type="dataset",
+                    token=HF_TOKEN,
+                    local_dir="/tmp/hf_cache"
+                )
+                with open(file_path, 'r') as f:
+                    cache[yr] = _json_sw.load(f)
+            except Exception:
+                pass
     except Exception:
         pass
     return cache
@@ -256,52 +264,53 @@ def _load_sweep_any(_bust=0):
     """
     found, best_date = {}, None
     try:
-        import requests as _req
+        from huggingface_hub import list_repo_files, hf_hub_download
         from datetime import datetime as _dt2
-        gl_token = _os_sw.environ.get("GITLAB_API_TOKEN", "")
-        if not gl_token:
-            return found, best_date
-        proj    = "P2SAMAPA%2Fp2-etf-regime-predictor"
-        gl_base = "https://gitlab.com"
-        headers = {"PRIVATE-TOKEN": gl_token}
-        r = _req.get(
-            f"{gl_base}/api/v4/projects/{proj}/repository/tree?path=data&per_page=100&ref=main",
-            headers=headers, timeout=10,
+        
+        # List all files in the data directory
+        files = list_repo_files(
+            repo_id=HF_DATASET_REPO,
+            repo_type="dataset",
+            token=HF_TOKEN
         )
-        if r.status_code != 200:
-            return found, best_date
-
+        
+        # Filter for sweep files
+        sweep_files = [f for f in files if f.startswith("data/sweep_") and f.endswith(".json")]
+        
         year_best = {}
-        for item in r.json():
-            name = item.get("name", "")
-            if name.startswith("sweep_") and name.endswith(".json"):
-                parts = name.replace(".json", "").split("_")
-                if len(parts) == 3:
-                    try:
-                        yr_int = int(parts[1])
-                        dt     = _dt2.strptime(parts[2], "%Y%m%d").date()
-                        if yr_int not in year_best or dt > year_best[yr_int]:
-                            year_best[yr_int] = dt
-                    except Exception:
-                        pass
+        for fname in sweep_files:
+            # Parse filename: data/sweep_{year}_{YYYYMMDD}.json
+            parts = fname.replace(".json", "").split("_")
+            if len(parts) >= 3:
+                try:
+                    yr_int = int(parts[1])
+                    dt_str = parts[2]
+                    dt = _dt2.strptime(dt_str, "%Y%m%d").date()
+                    if yr_int not in year_best or dt > year_best[yr_int]:
+                        year_best[yr_int] = dt
+                except Exception:
+                    pass
 
         for yr in SWEEP_YEARS:
             if yr not in year_best:
                 continue
-            yr_date  = year_best[yr]
+            yr_date = year_best[yr]
             date_str = yr_date.strftime("%Y%m%d")
-            fname    = f"data%2Fsweep_{yr}_{date_str}.json"
-            r2 = _req.get(
-                f"{gl_base}/api/v4/projects/{proj}/repository/files/{fname}/raw?ref=main",
-                headers=headers, timeout=10,
-            )
-            if r2.status_code == 200:
-                try:
-                    found[yr] = r2.json()
+            fname = f"data/sweep_{yr}_{date_str}.json"
+            try:
+                file_path = hf_hub_download(
+                    repo_id=HF_DATASET_REPO,
+                    filename=fname,
+                    repo_type="dataset",
+                    token=HF_TOKEN,
+                    local_dir="/tmp/hf_cache"
+                )
+                with open(file_path, 'r') as f:
+                    found[yr] = _json_sw.load(f)
                     if best_date is None or yr_date > best_date:
                         best_date = yr_date
-                except Exception:
-                    pass
+            except Exception:
+                pass
     except Exception:
         pass
     return found, best_date
@@ -593,7 +602,7 @@ with tab1:
         st.stop()
 
     # ── Load data ─────────────────────────────────────────────────────────────
-    with st.spinner("📥 Loading dataset from GitLab..."):
+    with st.spinner("📥 Loading dataset from Hugging Face..."):
         try:
             df = cached_get_data(start_year)
             st.success(f"✅ Dataset: {len(df):,} rows × {df.shape[1]} cols "
@@ -603,7 +612,7 @@ with tab1:
             st.stop()
 
     # ── Load models ───────────────────────────────────────────────────────────
-    with st.spinner("🧠 Loading models from GitLab..."):
+    with st.spinner("🧠 Loading models from Hugging Face..."):
         detector = cached_load_detector()
 
         if detector:
@@ -612,7 +621,7 @@ with tab1:
             st.warning("⚠️ Regime detector not found — run pipeline first")
 
         if use_momentum:
-            mom_bytes = load_momentum_ranker_from_gitlab()
+            mom_bytes = load_momentum_ranker_from_hf()
             if mom_bytes:
                 momentum_ranker = MomentumRanker.from_bytes(mom_bytes)
                 bank = None
@@ -656,17 +665,17 @@ with tab1:
             regime_int, regime_name = 0, "Unknown"
 
     # ── Load predictions ──────────────────────────────────────────────────────
-    with st.spinner("📡 Loading predictions from GitLab..."):
+    with st.spinner("📡 Loading predictions from Hugging Face..."):
         try:
             if use_wf:
-                pred_history = load_wf_momentum_predictions_from_gitlab()
+                pred_history = load_wf_momentum_predictions_from_hf()
                 src_label = "Walk-Forward OOS"
                 if pred_history is None:
                     st.error("⚠️ Walk-Forward predictions not found. "
                              "Trigger Manual Retrain with run_wfcv=true.")
                     st.stop()
             else:
-                pred_history = load_momentum_predictions_from_gitlab()
+                pred_history = load_momentum_predictions_from_hf()
                 src_label = "In-Sample"
                 if pred_history is None:
                     st.warning("⚠️ Momentum predictions not found — generating now...")
@@ -1038,7 +1047,7 @@ with tab1:
     # SIGNALS HISTORY
     # ═════════════════════════════════════════════════════════════════════════
     st.divider()
-    st.subheader("📡 Signal History (from GitLab)")
+    st.subheader("📡 Signal History (from Hugging Face)")
 
     try:
         sig_df = cached_load_signals()
@@ -1096,8 +1105,8 @@ with tab1:
     <h4 style="color:#00d1b2;">🔄 Daily Pipeline</h4>
     <p>GitHub Actions runs at 6:30am EST every weekday:
     fetch new data → detect regime → fit momentum ranker → generate signal →
-    push to GitLab. Walk-forward OOS predictions refresh monthly.
-    This UI is read-only — loads pre-computed signals from GitLab at runtime.</p>
+    push to Hugging Face Dataset. Walk-forward OOS predictions refresh monthly.
+    This UI is read-only — loads pre-computed signals from Hugging Face at runtime.</p>
 
     <h4 style="color:#00d1b2;">📅 Banner Date Logic</h4>
     <p>The "Next Trading Day Signal" date in the hero banner is always computed
