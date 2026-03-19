@@ -42,6 +42,9 @@ REGIME_NAMES  = {
     5: "Recovery",
 }
 
+# Define TARGET_ETFS locally to avoid import issues
+TARGET_ETFS = ["TLT", "VNQ", "SLV", "GLD", "LQD", "HYG"]
+
 # ── Wasserstein distance utilities ───────────────────────────────────────────
 
 def wasserstein_dist_1d(u: np.ndarray, v: np.ndarray) -> float:
@@ -424,8 +427,7 @@ class RegimeDetector:
         with negligible impact on regime quality (k=3 always wins,
         inertia difference between best-of-2 vs best-of-5 is <0.5%).
         """
-        from data_manager import TARGET_ETFS
-
+        # Use local TARGET_ETFS constant instead of importing
         if ret_cols is None:
             ret_cols = [f"{t}_Ret" for t in TARGET_ETFS
                         if f"{t}_Ret" in df.columns]
