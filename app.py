@@ -98,6 +98,7 @@ def cached_load_signals():
 
 # ── Constants ─────────────────────────────────────────────────────────────────
 BENCHMARK_COLS = {"SPY": "SPY_Ret", "AGG": "AGG_Ret"}
+DEFAULT_Z_MIN = 1.0  # Minimum Z-score for entry conviction
 
 # ── Sidebar ───────────────────────────────────────────────────────────────────
 with st.sidebar:
@@ -235,16 +236,15 @@ def _load_sweep_cache(date_str, _bust=0):
     cache = {}
     try:
         from huggingface_hub import hf_hub_download
-        import requests as _req
         
         for yr in SWEEP_YEARS:
-            fname = f"data/sweep_{yr}_{date_str}.json"
+            fname = f"sweep/sweep_{yr}_{date_str}.json"
             try:
                 file_path = hf_hub_download(
                     repo_id=HF_DATASET_REPO,
                     filename=fname,
                     repo_type="dataset",
-                    token=HF_TOKEN,
+                    token=HF_TOKEN or None,
                     local_dir="/tmp/hf_cache"
                 )
                 with open(file_path, 'r') as f:
@@ -267,42 +267,41 @@ def _load_sweep_any(_bust=0):
         from huggingface_hub import list_repo_files, hf_hub_download
         from datetime import datetime as _dt2
         
-        # List all files in the data directory
         files = list_repo_files(
             repo_id=HF_DATASET_REPO,
             repo_type="dataset",
-            token=HF_TOKEN
+            token=HF_TOKEN or None,
         )
         
-        # Filter for sweep files
-        sweep_files = [f for f in files if f.startswith("data/sweep_") and f.endswith(".json")]
-        
+        # BUG FIX: Check if files is empty, not r.status_code
+        if not files:
+            return found, best_date
+
         year_best = {}
-        for fname in sweep_files:
-            # Parse filename: data/sweep_{year}_{YYYYMMDD}.json
-            parts = fname.replace(".json", "").split("_")
-            if len(parts) >= 3:
-                try:
-                    yr_int = int(parts[1])
-                    dt_str = parts[2]
-                    dt = _dt2.strptime(dt_str, "%Y%m%d").date()
-                    if yr_int not in year_best or dt > year_best[yr_int]:
-                        year_best[yr_int] = dt
-                except Exception:
-                    pass
+        for name in files:
+            if name.startswith("sweep/sweep_") and name.endswith(".json"):
+                parts = name.replace(".json", "").split("_")
+                if len(parts) == 3:
+                    try:
+                        yr_int = int(parts[1])
+                        dt     = _dt2.strptime(parts[2], "%Y%m%d").date()
+                        if yr_int not in year_best or dt > year_best[yr_int]:
+                            year_best[yr_int] = dt
+                    except Exception:
+                        pass
 
         for yr in SWEEP_YEARS:
             if yr not in year_best:
                 continue
-            yr_date = year_best[yr]
+            yr_date  = year_best[yr]
             date_str = yr_date.strftime("%Y%m%d")
-            fname = f"data/sweep_{yr}_{date_str}.json"
+            fname    = f"sweep/sweep_{yr}_{date_str}.json"
             try:
                 file_path = hf_hub_download(
                     repo_id=HF_DATASET_REPO,
                     filename=fname,
                     repo_type="dataset",
-                    token=HF_TOKEN,
+                    token=HF_TOKEN or None,
                     local_dir="/tmp/hf_cache"
                 )
                 with open(file_path, 'r') as f:
