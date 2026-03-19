@@ -5,6 +5,7 @@ Training script with Hugging Face Dataset storage.
 
 Usage:
   python train_hf.py --start-year 2008                    # Full training
+  python train_hf.py --start-year 2008 --force-refresh  # Force data refresh
   python train_hf.py --start-year 2008 --sweep-mode       # Sweep only
   python train_hf.py --start-year 2008 --wfcv           # Walk-forward CV
 
@@ -89,12 +90,12 @@ def generate_predictions(df: pd.DataFrame, ranker: MomentumRanker) -> pd.DataFra
     return predictions
 
 
-def run_full_training(start_year: int, upload_to_hf: bool = True):
+def run_full_training(start_year: int, force_refresh: bool = False, upload_to_hf: bool = True):
     """Run full training pipeline and save to HF."""
     log.info(f"Starting full training from {start_year}...")
     
-    # Load data
-    df = get_data(start_year=start_year, force_refresh=False)
+    # Load data (with optional force refresh)
+    df = get_data(start_year=start_year, force_refresh=force_refresh)
     
     # Train regime detector
     detector = train_regime_detector(df, start_year)
@@ -142,13 +143,14 @@ def run_full_training(start_year: int, upload_to_hf: bool = True):
     return detector, ranker, predictions
 
 
-def run_sweep_mode(start_year: int):
+def run_sweep_mode(start_year: int, force_refresh: bool = False):
     """Run sweep mode: train and save results for consensus."""
     log.info(f"Running sweep mode for start year {start_year}...")
     
     # Run training
     detector, ranker, predictions = run_full_training(
         start_year=start_year, 
+        force_refresh=force_refresh,
         upload_to_hf=True  # Upload models for this year
     )
     
@@ -180,11 +182,11 @@ def run_sweep_mode(start_year: int):
     return metrics
 
 
-def run_walk_forward_cv(start_year: int):
+def run_walk_forward_cv(start_year: int, force_refresh: bool = False):
     """Run walk-forward cross-validation."""
     log.info(f"Running walk-forward CV from {start_year}...")
     
-    df = get_data(start_year=start_year, force_refresh=False)
+    df = get_data(start_year=start_year, force_refresh=force_refresh)
     
     # 3-year training, 1-year test windows
     train_years = 3
@@ -244,6 +246,8 @@ def main():
     parser = argparse.ArgumentParser(description="P2-ETF Training (HF Version)")
     parser.add_argument("--start-year", type=int, default=2008,
                         help="Training start year")
+    parser.add_argument("--force-refresh", action="store_true",
+                        help="Force refresh data from sources")
     parser.add_argument("--sweep-mode", action="store_true",
                         help="Run sweep mode (consensus)")
     parser.add_argument("--wfcv", action="store_true",
@@ -257,11 +261,13 @@ def main():
     
     try:
         if args.sweep_mode:
-            run_sweep_mode(args.start_year)
+            run_sweep_mode(args.start_year, force_refresh=args.force_refresh)
         elif args.wfcv:
-            run_walk_forward_cv(args.start_year)
+            run_walk_forward_cv(args.start_year, force_refresh=args.force_refresh)
         else:
-            run_full_training(args.start_year, upload_to_hf)
+            run_full_training(args.start_year, 
+                            force_refresh=args.force_refresh,
+                            upload_to_hf=upload_to_hf)
         
         log.info("Training completed successfully")
         
