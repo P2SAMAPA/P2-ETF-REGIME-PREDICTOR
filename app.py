@@ -52,7 +52,7 @@ HF_TOKEN = os.environ.get("HF_TOKEN", None)  # Optional: for private datasets
 
 # ── Imports ───────────────────────────────────────────────────────────────────
 try:
-    from data_manager import (
+    from data_manager_hf import (
         get_data, build_forward_targets,
         load_signals_from_hf, load_model_from_hf,
         load_feature_list_from_hf, load_predictions_from_hf,
