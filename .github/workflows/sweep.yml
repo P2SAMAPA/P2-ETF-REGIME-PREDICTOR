@@ -1,214 +1,41 @@
-# sweep.yml
-# Multi-Year Consensus Sweep — 6 sequential jobs (one per start year)
-# Auto-runs daily at 8pm EST (01:00 UTC Tue-Sat)
-# Cleans stale files at 9pm EST (02:00 UTC) — AFTER the sweep completes
-
 name: Multi-Year Consensus Sweep
 
 on:
   schedule:
-    - cron: "0 1 * * 2-6"    # 01:00 UTC = 8pm EST Mon-Fri  → run all 6 sweeps sequentially
-    - cron: "0 2 * * 2-6"    # 02:00 UTC = 9pm EST Mon-Fri  → cleanup stale files
+    # Run at 1:00 AM EST (6:00 AM UTC) daily
+    - cron: '0 1 * * *'
   workflow_dispatch:
     inputs:
       sweep_years:
-        description: "Comma-separated start years e.g. 2008,2013,2015,2017,2019,2021"
+        description: 'Comma-separated years to sweep (e.g., 2008,2013,2015)'
         required: false
-        default: "2008,2013,2015,2017,2019,2021"
+        default: '2008,2013,2015,2017,2019,2021'
 
 jobs:
-  # ── 9pm EST: clean stale sweep files — keep only latest per year ──────────────
-  cleanup_stale_sweep:
-    if: >
-      github.event_name == 'schedule' &&
-      github.event.schedule == '0 2 * * 2-6'
+  sweep-matrix:
     runs-on: ubuntu-latest
-    timeout-minutes: 10
-    env:
-      GITLAB_API_TOKEN: ${{ secrets.GITLAB_API_TOKEN }}
-      GITLAB_REPO_URL:  ${{ secrets.GITLAB_REPO_URL }}
+    strategy:
+      matrix:
+        year: ${{ fromJson(format('[{0}]', github.event.inputs.sweep_years || '2008,2013,2015,2017,2019,2021')) }}
+      fail-fast: false
+    timeout-minutes: 60
+
     steps:
-      - name: Keep only latest date-stamped file per sweep year
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+
+      - name: Install Dependencies
         run: |
-          pip install requests -q
-          python3 - <<'PYEOF'
-          import os, re, requests
-          from datetime import datetime
+          pip install -r requirements.txt
 
-          gl_token = os.environ["GITLAB_API_TOKEN"]
-          gl_url   = os.environ["GITLAB_REPO_URL"]
-
-          # Extract project ID from URL
-          match = re.search(r"projects/([^/?]+)", gl_url)
-          proj  = match.group(1) if match else None
-          if not proj:
-              proj = "P2SAMAPA%2Fp2-etf-regime-predictor"
-          gl_base = gl_url.split("/api/")[0] if "/api/" in gl_url else "https://gitlab.com"
-
-          headers = {"PRIVATE-TOKEN": gl_token}
-
-          # List all files in data/
-          r = requests.get(
-              f"{gl_base}/api/v4/projects/{proj}/repository/tree"
-              f"?path=data&per_page=100&ref=main",
-              headers=headers, timeout=10,
-          )
-          if r.status_code != 200:
-              print(f"Could not list repo tree: {r.status_code}")
-              exit(0)
-
-          # Group sweep files by year
-          from collections import defaultdict
-          year_files = defaultdict(list)
-
-          for item in r.json():
-              name = item.get("name", "")
-              if name.startswith("sweep_") and name.endswith(".json"):
-                  parts = name.replace(".json", "").split("_")
-                  if len(parts) == 3:
-                      try:
-                          yr_int   = int(parts[1])
-                          dt       = datetime.strptime(parts[2], "%Y%m%d").date()
-                          year_files[yr_int].append((dt, name))
-                      except Exception:
-                          pass
-
-          # For each year: keep newest, delete the rest
-          total_deleted = 0
-          for yr, entries in year_files.items():
-              if len(entries) <= 1:
-                  continue
-
-              entries.sort(key=lambda x: x[0], reverse=True)
-              keep_name  = entries[0][1]
-              to_delete  = [name for _, name in entries[1:]]
-
-              print(f"Year {yr}: keeping {keep_name}, deleting {len(to_delete)} old file(s)")
-
-              for old_name in to_delete:
-                  fpath = f"data%2F{old_name}"
-                  dr = requests.delete(
-                      f"{gl_base}/api/v4/projects/{proj}/repository/files/{fpath}",
-                      headers=headers,
-                      json={
-                          "branch": "main",
-                          "commit_message": f"[auto] Cleanup old sweep: {old_name}",
-                      },
-                      timeout=10,
-                  )
-                  if dr.status_code == 204:
-                      print(f"  ✅ Deleted {old_name}")
-                      total_deleted += 1
-                  else:
-                      print(f"  ⚠️ Could not delete {old_name}: {dr.status_code}")
-
-          print(f"\nCleanup complete — deleted {total_deleted} stale file(s) total")
-          PYEOF
-
-  # ── Sweep jobs (SEQUENTIAL using needs:) ────────────────────────────────────
-  sweep_2008:
-    if: >
-      (github.event_name == 'schedule' && github.event.schedule == '0 1 * * 2-6') ||
-      (github.event_name == 'workflow_dispatch' && contains(github.event.inputs.sweep_years, '2008'))
-    runs-on: ubuntu-latest
-    timeout-minutes: 30
-    env:
-      GITLAB_API_TOKEN: ${{ secrets.GITLAB_API_TOKEN }}
-      GITLAB_REPO_URL:  ${{ secrets.GITLAB_REPO_URL }}
-      FRED_API_KEY:     ${{ secrets.FRED_API_KEY }}
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with: {python-version: "3.11", cache: "pip"}
-      - run: pip install -r requirements.txt
-      - run: python train.py --sweep-mode --start-year 2008
-
-  sweep_2013:
-    needs: sweep_2008    # ← waits for 2008 to finish
-    if: >
-      (github.event_name == 'schedule' && github.event.schedule == '0 1 * * 2-6') ||
-      (github.event_name == 'workflow_dispatch' && contains(github.event.inputs.sweep_years, '2013'))
-    runs-on: ubuntu-latest
-    timeout-minutes: 30
-    env:
-      GITLAB_API_TOKEN: ${{ secrets.GITLAB_API_TOKEN }}
-      GITLAB_REPO_URL:  ${{ secrets.GITLAB_REPO_URL }}
-      FRED_API_KEY:     ${{ secrets.FRED_API_KEY }}
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with: {python-version: "3.11", cache: "pip"}
-      - run: pip install -r requirements.txt
-      - run: python train.py --sweep-mode --start-year 2013
-
-  sweep_2015:
-    needs: sweep_2013    # ← waits for 2013 to finish
-    if: >
-      (github.event_name == 'schedule' && github.event.schedule == '0 1 * * 2-6') ||
-      (github.event_name == 'workflow_dispatch' && contains(github.event.inputs.sweep_years, '2015'))
-    runs-on: ubuntu-latest
-    timeout-minutes: 30
-    env:
-      GITLAB_API_TOKEN: ${{ secrets.GITLAB_API_TOKEN }}
-      GITLAB_REPO_URL:  ${{ secrets.GITLAB_REPO_URL }}
-      FRED_API_KEY:     ${{ secrets.FRED_API_KEY }}
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with: {python-version: "3.11", cache: "pip"}
-      - run: pip install -r requirements.txt
-      - run: python train.py --sweep-mode --start-year 2015
-
-  sweep_2017:
-    needs: sweep_2015    # ← waits for 2015 to finish
-    if: >
-      (github.event_name == 'schedule' && github.event.schedule == '0 1 * * 2-6') ||
-      (github.event_name == 'workflow_dispatch' && contains(github.event.inputs.sweep_years, '2017'))
-    runs-on: ubuntu-latest
-    timeout-minutes: 30
-    env:
-      GITLAB_API_TOKEN: ${{ secrets.GITLAB_API_TOKEN }}
-      GITLAB_REPO_URL:  ${{ secrets.GITLAB_REPO_URL }}
-      FRED_API_KEY:     ${{ secrets.FRED_API_KEY }}
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with: {python-version: "3.11", cache: "pip"}
-      - run: pip install -r requirements.txt
-      - run: python train.py --sweep-mode --start-year 2017
-
-  sweep_2019:
-    needs: sweep_2017    # ← waits for 2017 to finish
-    if: >
-      (github.event_name == 'schedule' && github.event.schedule == '0 1 * * 2-6') ||
-      (github.event_name == 'workflow_dispatch' && contains(github.event.inputs.sweep_years, '2019'))
-    runs-on: ubuntu-latest
-    timeout-minutes: 30
-    env:
-      GITLAB_API_TOKEN: ${{ secrets.GITLAB_API_TOKEN }}
-      GITLAB_REPO_URL:  ${{ secrets.GITLAB_REPO_URL }}
-      FRED_API_KEY:     ${{ secrets.FRED_API_KEY }}
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with: {python-version: "3.11", cache: "pip"}
-      - run: pip install -r requirements.txt
-      - run: python train.py --sweep-mode --start-year 2019
-
-  sweep_2021:
-    needs: sweep_2019    # ← waits for 2019 to finish
-    if: >
-      (github.event_name == 'schedule' && github.event.schedule == '0 1 * * 2-6') ||
-      (github.event_name == 'workflow_dispatch' && contains(github.event.inputs.sweep_years, '2021'))
-    runs-on: ubuntu-latest
-    timeout-minutes: 30
-    env:
-      GITLAB_API_TOKEN: ${{ secrets.GITLAB_API_TOKEN }}
-      GITLAB_REPO_URL:  ${{ secrets.GITLAB_REPO_URL }}
-      FRED_API_KEY:     ${{ secrets.FRED_API_KEY }}
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with: {python-version: "3.11", cache: "pip"}
-      - run: pip install -r requirements.txt
-      - run: python train.py --sweep-mode --start-year 2021
+      - name: Run Sweep for Year ${{ matrix.year }}
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+          FRED_API_KEY: ${{ secrets.FRED_API_KEY }}
+        run: |
+          python train_hf.py --sweep-mode --start-year ${{ matrix.year }}
