@@ -37,21 +37,22 @@ logging.basicConfig(level=logging.INFO,
 log = logging.getLogger(__name__)
 
 
-def train_regime_detector(df: pd.DataFrame, start_year: int) -> RegimeDetector:
+def train_regime_detector(df: pd.DataFrame, start_year: int, sweep_mode: bool = False) -> RegimeDetector:
     """Train Wasserstein k-means regime detector."""
     log.info("Training regime detector...")
     
     # Use return columns for regime detection
     ret_cols = [f"{t}_Ret" for t in TARGET_ETFS if f"{t}_Ret" in df.columns]
     
+    # RegimeDetector only accepts window and k parameters (not max_k)
+    # k=None means auto-select optimal k, otherwise specify a number
     detector = RegimeDetector(
-        window=20,
-        max_k=5,
-        random_state=42
+        window=20,  # Default window size
+        k=None      # Auto-select optimal k via MMD scoring
     )
     
-    # Fit on full history
-    detector.fit(df[ret_cols])
+    # Fit on full history with sweep_mode option
+    detector.fit(df[ret_cols], sweep_mode=sweep_mode)
     
     log.info(f"Regime detector trained: k={detector.optimal_k_} regimes")
     return detector
@@ -90,15 +91,15 @@ def generate_predictions(df: pd.DataFrame, ranker: MomentumRanker) -> pd.DataFra
     return predictions
 
 
-def run_full_training(start_year: int, force_refresh: bool = False, upload_to_hf: bool = True):
+def run_full_training(start_year: int, force_refresh: bool = False, upload_to_hf: bool = True, sweep_mode: bool = False):
     """Run full training pipeline and save to HF."""
     log.info(f"Starting full training from {start_year}...")
     
     # Load data (with optional force refresh)
     df = get_data(start_year=start_year, force_refresh=force_refresh)
     
-    # Train regime detector
-    detector = train_regime_detector(df, start_year)
+    # Train regime detector (with sweep_mode for faster training if needed)
+    detector = train_regime_detector(df, start_year, sweep_mode=sweep_mode)
     
     # Train momentum ranker
     ranker = train_momentum_ranker(df, detector)
@@ -147,11 +148,12 @@ def run_sweep_mode(start_year: int, force_refresh: bool = False):
     """Run sweep mode: train and save results for consensus."""
     log.info(f"Running sweep mode for start year {start_year}...")
     
-    # Run training
+    # Run training with sweep_mode=True for faster regime detection
     detector, ranker, predictions = run_full_training(
         start_year=start_year, 
         force_refresh=force_refresh,
-        upload_to_hf=True  # Upload models for this year
+        upload_to_hf=True,  # Upload models for this year
+        sweep_mode=True     # Fast mode: k=3, reduced iterations
     )
     
     # Run backtest for metrics
@@ -164,7 +166,7 @@ def run_sweep_mode(start_year: int, force_refresh: bool = False):
     last_pred = predictions.iloc[-1]
     signal = ranker.get_top_pick(last_pred)
     
-    # Calculate metrics (simplified)
+    # Calculate metrics (simplified - you should implement proper backtest)
     metrics = {
         "signal": signal,
         "ann_return": 0.15,  # Placeholder - calculate properly
@@ -218,7 +220,7 @@ def run_walk_forward_cv(start_year: int, force_refresh: bool = False):
             continue
         
         # Train on window
-        detector = train_regime_detector(train_df, current_year)
+        detector = train_regime_detector(train_df, current_year, sweep_mode=False)
         ranker = train_momentum_ranker(train_df, detector)
         
         # Predict on test
@@ -267,7 +269,8 @@ def main():
         else:
             run_full_training(args.start_year, 
                             force_refresh=args.force_refresh,
-                            upload_to_hf=upload_to_hf)
+                            upload_to_hf=upload_to_hf,
+                            sweep_mode=False)
         
         log.info("Training completed successfully")
         
