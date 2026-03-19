@@ -65,14 +65,9 @@ def train_momentum_ranker(df: pd.DataFrame, detector: RegimeDetector) -> Momentu
     # Add regime labels
     df = detector.add_regime_to_df(df)
     
-    # Initialize ranker
-    ranker = MomentumRanker(
-        etfs=TARGET_ETFS,
-        lookback_windows=[5, 10, 21, 63],
-        roc_weights=[0.40, 0.30, 0.20, 0.10],
-        obv_weight=0.15,
-        breakout_weight=0.15
-    )
+    # Initialize ranker - MomentumRanker takes no parameters in __init__
+    # All configuration is hardcoded in the class (ROC_WEIGHTS, OBV_WEIGHT, etc.)
+    ranker = MomentumRanker()
     
     # Fit on full history (ranker is rules-based, fit stores feature stats)
     ranker.fit(df)
