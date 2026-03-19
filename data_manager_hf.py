@@ -34,7 +34,7 @@ from typing import Optional
 from io import BytesIO
 
 import yfinance as yf
-from huggingface_hub import HfApi, hf_hub_download
+from huggingface_hub import HfApi, hf_hub_download, list_repo_files
 
 logging.basicConfig(level=logging.INFO,
                     format="%(asctime)s [%(levelname)s] %(message)s")
@@ -42,7 +42,7 @@ log = logging.getLogger(__name__)
 
 # ── Constants ────────────────────────────────────────────────────────────────
 
-HF_REPO_ID       = "P2SAMAPA/p2-etf-regime-predictor"
+HF_REPO_ID       = os.getenv("HF_REPO_ID", "P2SAMAPA/p2-etf-regime-predictor")
 HF_TOKEN         = os.getenv("HF_TOKEN", "")
 FRED_API_KEY     = os.getenv("FRED_API_KEY", "")
 
@@ -188,6 +188,22 @@ def hf_write_parquet(path: str, df: pd.DataFrame, commit_msg: str) -> bool:
     except Exception as e:
         log.error(f"HF parquet write {path} failed: {e}")
         return False
+
+
+def hf_list_files(path: str = "", recursive: bool = False) -> list:
+    """List files in HF Dataset repository."""
+    try:
+        files = list_repo_files(
+            repo_id=HF_REPO_ID,
+            repo_type="dataset",
+            token=HF_TOKEN or None,
+        )
+        if path:
+            files = [f for f in files if f.startswith(path)]
+        return files
+    except Exception as e:
+        log.warning(f"HF list files failed: {e}")
+        return []
 
 
 # ── FRED data fetching ───────────────────────────────────────────────────────
@@ -679,6 +695,30 @@ def load_feature_list_from_hf() -> Optional[list]:
         return None
 
 
+# ═══════════════════════════════════════════════════════════════════════════════
+# NEW HF-SPECIFIC FUNCTIONS (for app.py imports)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+def load_momentum_ranker_from_hf() -> Optional[bytes]:
+    """Load momentum ranker model from HF Dataset."""
+    return load_model_from_hf("momentum_ranker.pkl")
+
+
+def load_momentum_predictions_from_hf() -> Optional[pd.DataFrame]:
+    """Load in-sample momentum predictions from HF Dataset."""
+    return load_predictions_from_hf("data/mom_pred_history.parquet")
+
+
+def load_wf_momentum_predictions_from_hf() -> Optional[pd.DataFrame]:
+    """Load walk-forward momentum predictions from HF Dataset."""
+    return load_wf_predictions_from_hf()
+
+
+def load_wf_ensemble_predictions_from_hf() -> Optional[pd.DataFrame]:
+    """Load walk-forward ensemble predictions from HF Dataset."""
+    return load_predictions_from_hf("data/wf_pred_history.parquet")
+
+
 # ── Main entry point for Streamlit ───────────────────────────────────────────
 
 def get_data(start_year: int = 2008,
@@ -714,7 +754,7 @@ save_predictions_to_gitlab = save_predictions_to_hf
 save_sweep_to_gitlab = save_sweep_to_hf
 load_feature_list_from_gitlab = load_feature_list_from_hf
 save_feature_list_to_gitlab = save_feature_list_to_hf
-load_momentum_ranker_from_gitlab = lambda: load_model_from_hf("momentum_ranker.pkl")
-load_momentum_predictions_from_gitlab = lambda: load_predictions_from_hf("data/mom_pred_history.parquet")
-load_wf_momentum_predictions_from_gitlab = load_wf_predictions_from_hf
-load_wf_ensemble_predictions_from_gitlab = lambda: load_predictions_from_hf("data/wf_pred_history.parquet")
+load_momentum_ranker_from_gitlab = load_momentum_ranker_from_hf
+load_momentum_predictions_from_gitlab = load_momentum_predictions_from_hf
+load_wf_momentum_predictions_from_gitlab = load_wf_momentum_predictions_from_hf
+load_wf_ensemble_predictions_from_gitlab = load_wf_ensemble_predictions_from_hf
