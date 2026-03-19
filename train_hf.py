@@ -76,6 +76,16 @@ def train_momentum_ranker(df: pd.DataFrame, detector: RegimeDetector) -> Momentu
     return ranker
 
 
+def get_top_pick(ranker: MomentumRanker, row: pd.Series) -> str:
+    """
+    Get the top ETF pick from momentum ranker for a single row.
+    Returns the ETF with the highest rank score.
+    """
+    preds = ranker.predict(row)
+    top_etf = preds['Rank_Score'].idxmax()
+    return top_etf
+
+
 def generate_predictions(df: pd.DataFrame, ranker: MomentumRanker) -> pd.DataFrame:
     """Generate predictions for all historical dates."""
     log.info("Generating predictions...")
@@ -128,7 +138,9 @@ def run_full_training(start_year: int, force_refresh: bool = False, upload_to_hf
         
         # Save signals (last prediction only)
         signals_df = predictions.tail(1).copy()
-        signals_df['Signal'] = ranker.get_top_pick(predictions.tail(1))
+        # Get the last row from original df to compute signal
+        last_row = df.loc[signals_df.index[0]]
+        signals_df['Signal'] = get_top_pick(ranker, last_row)
         save_signals_to_hf(signals_df)
         log.info("✅ Signals uploaded")
         
@@ -158,8 +170,9 @@ def run_sweep_mode(start_year: int, force_refresh: bool = False):
     daily_rets = predictions[ret_cols] if ret_cols else pd.DataFrame()
     
     # Get last prediction for signal
-    last_pred = predictions.iloc[-1]
-    signal = ranker.get_top_pick(last_pred)
+    last_pred_idx = predictions.index[-1]
+    last_row = predictions.loc[last_pred_idx]
+    signal = get_top_pick(ranker, last_row)
     
     # Calculate metrics (simplified - you should implement proper backtest)
     metrics = {
