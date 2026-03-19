@@ -1,10 +1,16 @@
 # P2-ETF-REGIME-PREDICTOR requirements
 
-# Data
-yfinance>=0.2.36
+# Core
+treamlit>=1.35.0
 pandas>=2.0.0
 numpy>=1.24.0
 requests>=2.31.0
+
+# Data sources
+yfinance>=0.2.36
+pandas-datareader>=0.10.0
+pandas-market-calendars>=5.3.0
+exchange-calendars>=4.13.1
 
 # FRED
 pandas-datareader>=0.10.0
@@ -13,12 +19,20 @@ pandas-datareader>=0.10.0
 lightgbm>=4.3.0
 scikit-learn>=1.4.0
 scipy>=1.12.0
+xgboost>=2.0.0
+
+# Hugging Face (replaces GitLab)
+huggingface-hub>=0.20.0
+
+# Parquet handling
+pyarrow>=15.0.0
+fastparquet>=2024.0.0
 
 # Streamlit UI
-streamlit>=1.35.0
 plotly>=5.20.0
+altair>=5.0.0
+pydeck>=0.9.0
 
 # Utilities
 pytz>=2024.1
 python-dotenv>=1.0.0
-xgboost
