@@ -1,92 +1,59 @@
-# manual_retrain.yml
-# Triggered manually for full rebuilds or diagnostics
-
-name: Manual Retrain
+name: Manual Retrain P2-ETF-REGIME-PREDICTOR
 
 on:
   workflow_dispatch:
     inputs:
       force_refresh:
-        description: "Force full dataset rebuild from scratch"
-        required: true
-        default: "true"
-        type: boolean
+        description: 'Force full dataset rebuild from scratch'
+        required: false
+        default: 'true'
       run_wfcv:
-        description: "Run walk-forward cross-validation (runs as separate job after retrain)"
+        description: 'Run walk-forward CV (takes ~3 hours)'
         required: false
-        default: "false"
-        type: boolean
+        default: 'false'
+      sweep_mode:
+        description: 'Run in sweep mode (for multi-year consensus)'
+        required: false
+        default: 'false'
       start_year:
-        description: "Start year for dataset (default 2008)"
+        description: 'Start year for sweep mode (e.g., 2008, 2013, 2015)'
         required: false
-        default: "2008"
-        type: string
+        default: ''
 
 jobs:
   retrain:
     runs-on: ubuntu-latest
-    timeout-minutes: 90
-
-    env:
-      GITLAB_API_TOKEN: ${{ secrets.GITLAB_API_TOKEN }}
-      GITLAB_REPO_URL:  ${{ secrets.GITLAB_REPO_URL }}
-      FRED_API_KEY:     ${{ secrets.FRED_API_KEY }}
+    timeout-minutes: 240
 
     steps:
-      - name: Checkout code
+      - name: Checkout Code
         uses: actions/checkout@v4
 
-      - name: Set up Python 3.11
+      - name: Set up Python
         uses: actions/setup-python@v5
         with:
-          python-version: "3.11"
-          cache: "pip"
+          python-version: '3.10'
 
-      - name: Install dependencies
-        run: pip install -r requirements.txt
+      - name: Install Dependencies
+        run: |
+          pip install -r requirements.txt
 
-      - name: Run full retrain
-        run: python train.py --force-refresh
-
-      - name: Upload artifacts
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: retrain-logs-${{ github.run_id }}
-          path: "*.log"
-          retention-days: 30
-
-  walk_forward:
-    runs-on: ubuntu-latest
-    timeout-minutes: 180
-    needs: retrain
-    if: ${{ github.event.inputs.run_wfcv == 'true' }}
-
-    env:
-      GITLAB_API_TOKEN: ${{ secrets.GITLAB_API_TOKEN }}
-      GITLAB_REPO_URL:  ${{ secrets.GITLAB_REPO_URL }}
-      FRED_API_KEY:     ${{ secrets.FRED_API_KEY }}
-
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
-
-      - name: Set up Python 3.11
-        uses: actions/setup-python@v5
-        with:
-          python-version: "3.11"
-          cache: "pip"
-
-      - name: Install dependencies
-        run: pip install -r requirements.txt
-
-      - name: Run walk-forward validation
-        run: python train.py --wfcv-only
-
-      - name: Upload WF artifacts
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: wf-logs-${{ github.run_id }}
-          path: "*.log"
-          retention-days: 30
+      - name: Run Retrain
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+          FRED_API_KEY: ${{ secrets.FRED_API_KEY }}
+        run: |
+          ARGS=""
+          if [ "${{ github.event.inputs.force_refresh }}" == "true" ]; then
+            ARGS="$ARGS --force-refresh"
+          fi
+          if [ "${{ github.event.inputs.run_wfcv }}" == "true" ]; then
+            ARGS="$ARGS --wfcv"
+          fi
+          if [ "${{ github.event.inputs.sweep_mode }}" == "true" ]; then
+            ARGS="$ARGS --sweep-mode"
+          fi
+          if [ -n "${{ github.event.inputs.start_year }}" ]; then
+            ARGS="$ARGS --start-year ${{ github.event.inputs.start_year }}"
+          fi
+          python train_hf.py $ARGS
