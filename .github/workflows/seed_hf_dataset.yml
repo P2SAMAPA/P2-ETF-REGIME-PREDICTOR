@@ -26,7 +26,7 @@ jobs:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
           FRED_API_KEY: ${{ secrets.FRED_API_KEY }}
         run: |
-          python << 'EOF'
+          python << 'PYEOF'
           import os
           import sys
           import logging
@@ -83,21 +83,23 @@ jobs:
           api = HfApi(token=os.getenv("HF_TOKEN"))
 
           # Create directory structure with README files
-          readme_content = """# P2-ETF-REGIME-PREDICTOR Dataset
-
-## Structure
-
-- `data/` — Feature datasets and predictions (Parquet)
-- `models/` — Serialized ML models (Pickle)
-- `signals/` — Daily trading signals (Parquet)
-- `meta/` — Feature metadata (JSON)
-- `sweep/` — Multi-year consensus results (JSON)
-
-## Usage
-
-This dataset is consumed by the P2-ETF-REGIME-PREDICTOR Streamlit app.
-Data updates daily via GitHub Actions at 6:30am EST.
-"""
+          readme_lines = [
+              "# P2-ETF-REGIME-PREDICTOR Dataset",
+              "",
+              "## Structure",
+              "",
+              "- data/ — Feature datasets and predictions (Parquet)",
+              "- models/ — Serialized ML models (Pickle)",
+              "- signals/ — Daily trading signals (Parquet)",
+              "- meta/ — Feature metadata (JSON)",
+              "- sweep/ — Multi-year consensus results (JSON)",
+              "",
+              "## Usage",
+              "",
+              "This dataset is consumed by the P2-ETF-REGIME-PREDICTOR Streamlit app.",
+              "Data updates daily via GitHub Actions at 6:30am EST.",
+          ]
+          readme_content = "\n".join(readme_lines)
 
           api.upload_file(
               path_or_fileobj=readme_content.encode('utf-8'),
@@ -129,4 +131,4 @@ Data updates daily via GitHub Actions at 6:30am EST.
           log.info("   Actions → Manual Retrain → run_wfcv=true")
           log.info("2. Verify Streamlit app can load from HF")
           log.info("3. Set up daily pipeline for incremental updates")
-          EOF
+          PYEOF
