@@ -42,7 +42,7 @@ log = logging.getLogger(__name__)
 
 # ── Constants ────────────────────────────────────────────────────────────────
 
-HF_REPO_ID       = os.getenv("HF_REPO_ID", "P2SAMAPA/p2-etf-regime-predictor")
+HF_REPO_ID = os.getenv("HF_DATASET_REPO", os.getenv("HF_REPO_ID", "P2SAMAPA/p2-etf-regime-predictor"))
 HF_TOKEN         = os.getenv("HF_TOKEN", "")
 FRED_API_KEY     = os.getenv("FRED_API_KEY", "")
 
