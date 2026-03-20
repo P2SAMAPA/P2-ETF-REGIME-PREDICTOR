@@ -2,31 +2,6 @@
 app.py — P2-ETF-REGIME-PREDICTOR
 ==================================
 Streamlit UI for the Wasserstein Regime-Aware ETF Rotation Model.
-
-Fixes (2026-03-10):
-  - Hero banner date now always shows the TRUE next trading day from today's
-    EST clock — not the model's stale next_date derived from pred_history.
-    When pred_history is stale (pipeline hasn't run yet), the banner correctly
-    shows tomorrow's date while a staleness warning appears below.
-  - Hero box background changed to white with coloured accent border.
-  - Audit trail shows a staleness warning when pred_history is not current.
-
-Migration (2026-03-19):
-  - Migrated from GitLab to Hugging Face Dataset for model storage
-  - Uses huggingface_hub for file downloads
-
-Architecture:
-  - Loads pre-trained models and signals from Hugging Face Dataset (read-only)
-  - Runs backtest on historical predictions for equity curve
-  - Displays next-day signal, regime, conviction, and audit trail
-  - No training happens in the UI — all compute is in GitHub Actions
-
-Reference:
-  "Clustering Market Regimes Using the Wasserstein Distance"
-  B. Horvath, Z. Issa, A. Muguruza (2021)
-  https://papers.ssrn.com/sol3/papers.cfm?abstract_id=3947905
-
-Author: P2SAMAPA
 """
 
 import streamlit as st
@@ -48,7 +23,9 @@ st.set_page_config(
 
 # ── Hugging Face Dataset Configuration ───────────────────────────────────────
 HF_DATASET_REPO = os.environ.get("HF_DATASET_REPO", "P2SAMAPA/p2-etf-regime-predictor")
-HF_TOKEN = os.environ.get("HF_TOKEN", None)  # Optional: for private datasets
+HF_TOKEN        = os.environ.get("HF_TOKEN", None)
+GH_PAT          = os.environ.get("GH_PAT", None)
+GITHUB_REPO     = os.environ.get("GITHUB_REPO", "P2SAMAPA/P2-ETF-REGIME-PREDICTOR")
 
 # ── Imports ───────────────────────────────────────────────────────────────────
 try:
@@ -98,7 +75,7 @@ def cached_load_signals():
 
 # ── Constants ─────────────────────────────────────────────────────────────────
 BENCHMARK_COLS = {"SPY": "SPY_Ret", "AGG": "AGG_Ret"}
-DEFAULT_Z_MIN = 1.0  # Minimum Z-score for entry conviction
+DEFAULT_Z_MIN  = 1.0
 
 # ── Sidebar ───────────────────────────────────────────────────────────────────
 with st.sidebar:
@@ -138,9 +115,10 @@ with st.sidebar:
     st.divider()
 
     st.subheader("📊 Display")
-    benchmark = st.selectbox("Benchmark", ["SPY", "AGG", "None"])
+    benchmark    = st.selectbox("Benchmark", ["SPY", "AGG", "None"])
     use_momentum = True
     st.divider()
+
     st.subheader("📊 Backtest Mode")
     bt_mode = st.radio(
         "Validation Method",
@@ -155,10 +133,9 @@ with st.sidebar:
         )
     )
     use_wf = "Walk-Forward" in bt_mode
-
     st.divider()
-    run_btn     = st.button("🚀 Run Model", type="primary", use_container_width=True)
-    refresh_btn = st.button("🔄 Force Data Refresh", use_container_width=True)
+
+    run_btn = st.button("🚀 Run Model", type="primary", use_container_width=True)
 
 # ── Main panel ────────────────────────────────────────────────────────────────
 st.title("📈 P2-ETF Regime-Aware Rotation Model")
@@ -167,50 +144,9 @@ st.caption(
     "ETFs: TLT · VNQ · SLV · GLD · LQD · HYG"
 )
 
-if "refresh_status" not in st.session_state:
-    st.session_state.refresh_status = None
-
-if refresh_btn:
-    with st.spinner("🔄 Triggering pipeline via GitHub Actions..."):
-        try:
-            import requests, os
-            gh_token = os.environ.get("GITHUB_PAT", "")
-            gh_repo  = os.environ.get("GITHUB_REPO",
-                        "P2SAMAPA/P2-ETF-REGIME-PREDICTOR")
-            if not gh_token:
-                raise ValueError("GITHUB_PAT secret not set in Streamlit")
-            resp = requests.post(
-                f"https://api.github.com/repos/{gh_repo}/actions/workflows/daily_pipeline.yml/dispatches",
-                headers={
-                    "Authorization": f"Bearer {gh_token}",
-                    "Accept": "application/vnd.github+json",
-                },
-                json={"ref": "main"},
-                timeout=15,
-            )
-            if resp.status_code == 204:
-                st.cache_data.clear()
-                st.cache_resource.clear()
-                st.session_state.refresh_status = (
-                    "ok",
-                    "✅ Pipeline triggered — GitHub Actions is fetching fresh data. "
-                    "Check back in ~5 minutes then click **Run Model** to see updated results."
-                )
-            else:
-                raise ValueError(f"GitHub API returned {resp.status_code}: {resp.text}")
-        except Exception as e:
-            st.session_state.refresh_status = ("err", f"❌ Trigger failed: {e}")
-
-if st.session_state.refresh_status:
-    status, msg = st.session_state.refresh_status
-    if status == "ok":
-        st.success(msg)
-    else:
-        st.error(msg)
-
-
 # ── Sweep helpers ─────────────────────────────────────────────────────────────
-import json as _json_sw, re as _re_sw, os as _os_sw
+import json as _json_sw
+import os as _os_sw
 
 SWEEP_YEARS = [2008, 2013, 2015, 2017, 2019, 2021]
 
@@ -232,11 +168,9 @@ def _trigger_sweep(years, gh_token, gh_repo):
 
 @st.cache_data(ttl=60, show_spinner=False)
 def _load_sweep_cache(date_str, _bust=0):
-    """Load sweep files specifically dated today (date_str = YYYYMMDD)."""
     cache = {}
     try:
         from huggingface_hub import hf_hub_download
-        
         for yr in SWEEP_YEARS:
             fname = f"sweep/sweep_{yr}_{date_str}.json"
             try:
@@ -257,26 +191,17 @@ def _load_sweep_cache(date_str, _bust=0):
 
 @st.cache_data(ttl=60, show_spinner=False)
 def _load_sweep_any(_bust=0):
-    """
-    Load the most recent sweep result for EACH year independently.
-    Per-year independent date lookup — always shows latest per year.
-    Returns (found_dict, display_date).
-    """
     found, best_date = {}, None
     try:
         from huggingface_hub import list_repo_files, hf_hub_download
         from datetime import datetime as _dt2
-        
         files = list_repo_files(
             repo_id=HF_DATASET_REPO,
             repo_type="dataset",
             token=HF_TOKEN or None,
         )
-        
-        # BUG FIX: Check if files is empty, not r.status_code
         if not files:
             return found, best_date
-
         year_best = {}
         for name in files:
             if name.startswith("sweep/sweep_") and name.endswith(".json"):
@@ -289,7 +214,6 @@ def _load_sweep_any(_bust=0):
                             year_best[yr_int] = dt
                     except Exception:
                         pass
-
         for yr in SWEEP_YEARS:
             if yr not in year_best:
                 continue
@@ -315,18 +239,17 @@ def _load_sweep_any(_bust=0):
     return found, best_date
 
 def _compute_consensus(sweep_data):
-    import numpy as _np
     rows = []
     for yr, sig in sweep_data.items():
         rows.append({
             "year":       yr,
-            "signal":     sig.get("signal","?"),
+            "signal":     sig.get("signal", "?"),
             "ann_return": float(sig.get("ann_return", 0.0)),
             "z_score":    float(sig.get("z_score", 0.0)),
             "sharpe":     float(sig.get("sharpe", 0.0)),
             "max_dd":     float(sig.get("max_dd", 0.0)),
-            "conviction": sig.get("conviction","?"),
-            "regime":     sig.get("regime","?"),
+            "conviction": sig.get("conviction", "?"),
+            "regime":     sig.get("regime", "?"),
         })
     if not rows:
         return {}
@@ -334,13 +257,13 @@ def _compute_consensus(sweep_data):
     def _mm(s):
         mn, mx = s.min(), s.max()
         return (s - mn) / (mx - mn + 1e-9)
-    df_c["wtd"] = (0.40*_mm(df_c["ann_return"]) + 0.20*_mm(df_c["z_score"]) +
-                   0.20*_mm(df_c["sharpe"])      + 0.20*_mm(-df_c["max_dd"]))
+    df_c["wtd"] = (0.40 * _mm(df_c["ann_return"]) + 0.20 * _mm(df_c["z_score"]) +
+                   0.20 * _mm(df_c["sharpe"])      + 0.20 * _mm(-df_c["max_dd"]))
     etf_agg = {}
     for _, row in df_c.iterrows():
         e = row["signal"]
-        etf_agg.setdefault(e, {"years":[], "scores":[], "returns":[],
-                                "zs":[], "sharpes":[], "dds":[]})
+        etf_agg.setdefault(e, {"years": [], "scores": [], "returns": [],
+                                "zs": [], "sharpes": [], "dds": []})
         etf_agg[e]["years"].append(row["year"])
         etf_agg[e]["scores"].append(row["wtd"])
         etf_agg[e]["returns"].append(row["ann_return"])
@@ -356,23 +279,22 @@ def _compute_consensus(sweep_data):
             "score_share": round(cs / total, 3),
             "n_years":     len(v["years"]),
             "years":       v["years"],
-            "avg_return":  round(float(_np.mean(v["returns"])), 4),
-            "avg_z":       round(float(_np.mean(v["zs"])), 3),
-            "avg_sharpe":  round(float(_np.mean(v["sharpes"])), 3),
-            "avg_max_dd":  round(float(_np.mean(v["dds"])), 4),
+            "avg_return":  round(float(np.mean(v["returns"])), 4),
+            "avg_z":       round(float(np.mean(v["zs"])), 3),
+            "avg_sharpe":  round(float(np.mean(v["sharpes"])), 3),
+            "avg_max_dd":  round(float(np.mean(v["dds"])), 4),
         }
     winner_etf = max(summary, key=lambda e: summary[e]["cum_score"])
     return {"winner": winner_etf, "etf_summary": summary,
             "per_year": df_c.to_dict("records"), "n_years": len(rows)}
 
 ETF_COLORS_SW = {
-    "TLT":"#4e79a7","VNQ":"#76b7b2","SLV":"#edc948","GLD":"#b07aa1",
-    "LQD":"#59a14f","HYG":"#e15759","CASH":"#aaaaaa",
+    "TLT": "#4e79a7", "VNQ": "#76b7b2", "SLV": "#edc948", "GLD": "#b07aa1",
+    "LQD": "#59a14f", "HYG": "#e15759", "CASH": "#aaaaaa",
 }
 
 # ── Tabs ──────────────────────────────────────────────────────────────────────
 tab1, tab2 = st.tabs(["📊 Single-Year Results", "🔄 Multi-Year Consensus Sweep"])
-
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # TAB 2 — Multi-Year Consensus Sweep
@@ -395,12 +317,10 @@ with tab2:
 
     today_cache          = _load_sweep_cache(today_str, _bust=st.session_state.sweep_bust)
     all_cache, best_date = _load_sweep_any(_bust=st.session_state.sweep_bust)
-
-    prev_cache    = {yr: v for yr, v in all_cache.items() if yr not in today_cache}
-    display_cache = {**prev_cache, **today_cache}
-    display_date  = today_sw if today_cache else best_date
-
-    sweep_complete = len(today_cache) == len(SWEEP_YEARS)
+    prev_cache           = {yr: v for yr, v in all_cache.items() if yr not in today_cache}
+    display_cache        = {**prev_cache, **today_cache}
+    display_date         = today_sw if today_cache else best_date
+    sweep_complete       = len(today_cache) == len(SWEEP_YEARS)
 
     if prev_cache and not sweep_complete:
         st.warning(
@@ -421,10 +341,10 @@ with tab2:
     st.caption("✅ today · 📅 previous · ⏳ not run")
     st.divider()
 
-    _missing      = [y for y in SWEEP_YEARS if y not in today_cache]
-    _force_rerun  = st.checkbox("🔄 Force re-run all years", value=False,
-                                help="Re-trains even if today\'s results already exist")
-    _trigger_yrs  = SWEEP_YEARS if _force_rerun else _missing
+    _missing     = [y for y in SWEEP_YEARS if y not in today_cache]
+    _force_rerun = st.checkbox("🔄 Force re-run all years", value=False,
+                               help="Re-trains even if today's results already exist")
+    _trigger_yrs = SWEEP_YEARS if _force_rerun else _missing
 
     _cb, _cr, _ci = st.columns([1, 1, 2])
     with _cb:
@@ -439,7 +359,7 @@ with tab2:
             st.rerun()
     with _ci:
         if sweep_complete and not _force_rerun:
-            st.success(f"✅ Today\'s sweep complete ({today_sw}) — all {len(SWEEP_YEARS)} years ready")
+            st.success(f"✅ Today's sweep complete ({today_sw}) — all {len(SWEEP_YEARS)} years ready")
         else:
             st.info(f"**{len(today_cache)}/{len(SWEEP_YEARS)}** years done today · "
                     f"**{len(display_cache)}/{len(SWEEP_YEARS)}** total available.  \n"
@@ -447,17 +367,14 @@ with tab2:
 
     if _sweep_btn and _trigger_yrs:
         try:
-            import os as _os_sw
-            _gh_token = _os_sw.environ.get("GITHUB_PAT", "")
-            _gh_repo  = _os_sw.environ.get("GITHUB_REPO", "P2SAMAPA/P2-ETF-REGIME-PREDICTOR")
-            if not _gh_token:
-                raise ValueError("GITHUB_PAT secret not set")
-            _ok = _trigger_sweep(_trigger_yrs, _gh_token, _gh_repo)
+            if not GH_PAT:
+                raise ValueError("GH_PAT secret not set in Streamlit")
+            _ok = _trigger_sweep(_trigger_yrs, GH_PAT, GITHUB_REPO)
             if _ok:
                 st.success(f"✅ Triggered {len(_trigger_yrs)} jobs: "
                            f"{', '.join(str(y) for y in _trigger_yrs)}. ~10-15 mins each.")
             else:
-                st.error("❌ GitHub API returned non-204. Check GITHUB_PAT permissions.")
+                st.error("❌ GitHub API returned non-204. Check GH_PAT permissions.")
         except Exception as _ex:
             st.error(f"❌ Trigger failed: {_ex}")
 
@@ -468,12 +385,12 @@ with tab2:
         if not _cons:
             st.warning("Could not compute consensus.")
         else:
-            _w     = _cons["winner"]
-            _wi    = _cons["etf_summary"][_w]
-            _wc    = ETF_COLORS_SW.get(_w, "#0066cc")
-            _sp    = _wi["score_share"] * 100
-            _sp    = _sp if _sp == _sp else 0.0
-            _slab  = "⚠️ Split Signal" if _wi["score_share"] < 0.40 else "✅ Clear Consensus"
+            _w    = _cons["winner"]
+            _wi   = _cons["etf_summary"][_w]
+            _wc   = ETF_COLORS_SW.get(_w, "#0066cc")
+            _sp   = _wi["score_share"] * 100
+            _sp   = _sp if _sp == _sp else 0.0
+            _slab = "⚠️ Split Signal" if _wi["score_share"] < 0.40 else "✅ Clear Consensus"
 
             st.markdown(f"""
             <div style="background:linear-gradient(135deg,#1a1a2e,#16213e);
@@ -505,44 +422,43 @@ with tab2:
             </div>
             """, unsafe_allow_html=True)
 
-            _others = sorted([(e,v) for e,v in _cons["etf_summary"].items() if e != _w],
+            _others = sorted([(e, v) for e, v in _cons["etf_summary"].items() if e != _w],
                              key=lambda x: -x[1]["cum_score"])
             if _others:
                 _parts = [f'<span style="color:{ETF_COLORS_SW.get(e,"#888")};font-weight:600;">{e}</span> '
-                          f'<span style="color:#aaa;">({v["cum_score"]:.2f})</span>' for e,v in _others]
+                          f'<span style="color:#aaa;">({v["cum_score"]:.2f})</span>' for e, v in _others]
                 st.markdown('<div style="text-align:center;font-size:13px;margin-bottom:12px;">Also ranked: '
                             + ' &nbsp;|&nbsp; '.join(_parts) + '</div>', unsafe_allow_html=True)
             st.divider()
 
-            import plotly.graph_objects as _go
             _c1, _c2 = st.columns(2)
             with _c1:
                 st.markdown("**Weighted Score per ETF**")
                 _es   = _cons["etf_summary"]
                 _setf = sorted(_es.keys(), key=lambda e: -_es[e]["cum_score"])
-                _fb   = _go.Figure(_go.Bar(
+                _fb   = go.Figure(go.Bar(
                     x=_setf,
                     y=[_es[e]["cum_score"] for e in _setf],
-                    marker_color=[ETF_COLORS_SW.get(e,"#888") for e in _setf],
+                    marker_color=[ETF_COLORS_SW.get(e, "#888") for e in _setf],
                     text=[f"{_es[e]['n_years']}yr · {_es[e]['score_share']*100:.0f}%"
                           for e in _setf],
                     textposition="outside",
                 ))
                 _fb.update_layout(template="plotly_dark", height=360,
                                   yaxis_title="Cumulative Score", showlegend=False,
-                                  margin=dict(t=20,b=20))
+                                  margin=dict(t=20, b=20))
                 st.plotly_chart(_fb, use_container_width=True)
 
             with _c2:
                 st.markdown("**Z-Score Conviction by Start Year**")
-                _fs = _go.Figure()
+                _fs = go.Figure()
                 for _row in _cons["per_year"]:
                     _etf = _row["signal"]
                     _col = ETF_COLORS_SW.get(_etf, "#888")
-                    _fs.add_trace(_go.Scatter(
+                    _fs.add_trace(go.Scatter(
                         x=[_row["year"]], y=[_row["z_score"]],
                         mode="markers+text",
-                        marker=dict(size=18, color=_col, line=dict(color="white",width=1)),
+                        marker=dict(size=18, color=_col, line=dict(color="white", width=1)),
                         text=[_etf], textposition="top center", showlegend=False,
                         hovertemplate=(f"<b>{_etf}</b><br>Year: {_row['year']}<br>"
                                        f"Z: {_row['z_score']:.2f}σ<br>"
@@ -551,7 +467,7 @@ with tab2:
                 _fs.add_hline(y=0, line_dash="dot", line_color="rgba(255,255,255,0.3)")
                 _fs.update_layout(template="plotly_dark", height=360,
                                   xaxis_title="Start Year", yaxis_title="Z-Score (σ)",
-                                  margin=dict(t=20,b=20))
+                                  margin=dict(t=20, b=20))
                 st.plotly_chart(_fs, use_container_width=True)
 
             st.subheader("📋 Full Per-Year Breakdown")
@@ -562,8 +478,8 @@ with tab2:
                 _tbl.append({
                     "Start Year":   _row["year"],
                     "Signal":       _row["signal"],
-                    "Regime":       _row.get("regime","?"),
-                    "Conviction":   _row.get("conviction","?"),
+                    "Regime":       _row.get("regime", "?"),
+                    "Conviction":   _row.get("conviction", "?"),
                     "Wtd Score":    round(_row["wtd"], 3),
                     "Z-Score":      f"{_row['z_score']:.2f}σ",
                     "Ann. Return":  f"{_row['ann_return']*100:.2f}%",
@@ -573,16 +489,17 @@ with tab2:
                 })
             _tdf = pd.DataFrame(_tbl)
             def _ss(val):
-                c = ETF_COLORS_SW.get(val,"#888")
+                c = ETF_COLORS_SW.get(val, "#888")
                 return f"background-color:{c}22;color:{c};font-weight:700;"
             def _sr(val):
                 try:
-                    v = float(str(val).replace("%",""))
-                    return "color:#00b894;font-weight:600" if v>0 else "color:#d63031;font-weight:600"
-                except Exception: return ""
-            st.dataframe(_tdf.style.applymap(_ss,subset=["Signal"])
-                                   .applymap(_sr,subset=["Ann. Return"])
-                                   .set_properties(**{"text-align":"center"})
+                    v = float(str(val).replace("%", ""))
+                    return "color:#00b894;font-weight:600" if v > 0 else "color:#d63031;font-weight:600"
+                except Exception:
+                    return ""
+            st.dataframe(_tdf.style.applymap(_ss, subset=["Signal"])
+                                   .applymap(_sr, subset=["Ann. Return"])
+                                   .set_properties(**{"text-align": "center"})
                                    .hide(axis="index"),
                          use_container_width=True, height=280)
 
@@ -613,7 +530,6 @@ with tab1:
     # ── Load models ───────────────────────────────────────────────────────────
     with st.spinner("🧠 Loading models from Hugging Face..."):
         detector = cached_load_detector()
-
         if detector:
             st.success(f"✅ Regime detector loaded (k={detector.optimal_k_})")
         else:
@@ -623,11 +539,11 @@ with tab1:
             mom_bytes = load_momentum_ranker_from_hf()
             if mom_bytes:
                 momentum_ranker = MomentumRanker.from_bytes(mom_bytes)
-                bank = None
                 st.success("✅ Momentum ranker loaded (Option B — RoC + Volume + Breakout)")
             else:
                 st.error("⚠️ Momentum ranker not found — run Manual Retrain first")
                 momentum_ranker = None
+
     if detector is None or momentum_ranker is None:
         st.error("Models not available. Trigger Manual Retrain in GitHub Actions first.")
         st.stop()
@@ -657,7 +573,6 @@ with tab1:
             st.warning(f"Regime labelling failed: {e} — using global regime")
             df["Regime"]      = 0
             df["Regime_Name"] = "Global"
-
         try:
             regime_int, regime_name = detector.get_current_regime(df)
         except Exception:
@@ -668,14 +583,14 @@ with tab1:
         try:
             if use_wf:
                 pred_history = load_wf_momentum_predictions_from_hf()
-                src_label = "Walk-Forward OOS"
+                src_label    = "Walk-Forward OOS"
                 if pred_history is None:
                     st.error("⚠️ Walk-Forward predictions not found. "
                              "Trigger Manual Retrain with run_wfcv=true.")
                     st.stop()
             else:
                 pred_history = load_momentum_predictions_from_hf()
-                src_label = "In-Sample"
+                src_label    = "In-Sample"
                 if pred_history is None:
                     st.warning("⚠️ Momentum predictions not found — generating now...")
                     pred_history = momentum_ranker.predict_all_history(df)
@@ -697,7 +612,6 @@ with tab1:
 
         try:
             cutoff = pd.Timestamp(f"{start_year}-01-01")
-
             if not isinstance(pred_history.index, pd.DatetimeIndex):
                 pred_history.index = pd.to_datetime(pred_history.index)
             if not isinstance(daily_rets.index, pd.DatetimeIndex):
@@ -712,49 +626,36 @@ with tab1:
 
             (strat_rets, audit_trail, _model_next_date, next_signal,
              conviction_z, conviction_label, last_p) = execute_strategy(
-                predictions_df = pred_bt,
-                daily_ret_df   = rets_bt,
-                rf_rate        = rf_rate,
-                z_reentry      = z_reentry,
-                stop_loss_pct  = stop_loss_pct,
-                fee_bps        = fee_bps,
-                regime_series  = reg_bt,
+                predictions_df=pred_bt,
+                daily_ret_df=rets_bt,
+                rf_rate=rf_rate,
+                z_reentry=z_reentry,
+                stop_loss_pct=stop_loss_pct,
+                fee_bps=fee_bps,
+                regime_series=reg_bt,
             )
             metrics = calculate_metrics(strat_rets, rf_rate=rf_rate)
-
         except Exception as e:
             st.error(f"❌ Backtest failed: {e}")
             st.stop()
 
-    # ── Compute TRUE next trading day from today's clock ──────────────────────
-    # The model's _model_next_date is derived from the last date in pred_history.
-    # If the pipeline hasn't run today, pred_history may be stale (e.g. last
-    # date = Mar 06 → model says next = Mar 09). We always show the ACTUAL
-    # next trading day from today's EST clock so the banner date is correct.
+    # ── True next trading day ─────────────────────────────────────────────────
     true_next_date = next_trading_day_from_today()
-
-    # Warn if pred_history is stale (more than 1 trading day behind today)
     pred_last_date = pred_bt.index[-1].date()
-    from datetime import date as _date
     today_est_date = _today_est()
-    days_stale = (today_est_date - pred_last_date).days
+    days_stale     = (today_est_date - pred_last_date).days
     if days_stale > 1:
         st.warning(
             f"⚠️ **Predictions are stale** — last update: **{pred_last_date}** "
             f"({days_stale} calendar days ago). "
-            "The signal shown is based on the most recent available data. "
-            "Click **🔄 Force Data Refresh** in the sidebar to trigger a new pipeline run.",
+            "The signal shown is based on the most recent available data.",
             icon="📅"
         )
 
-    # ═════════════════════════════════════════════════════════════════════════
-    # SIGNAL BANNER — white background, coloured accent
-    # ═════════════════════════════════════════════════════════════════════════
+    # ── Signal banner ─────────────────────────────────────────────────────────
     st.divider()
     regime_col = regime_colour(regime_name)
     conv_col   = conviction_colour(conviction_label)
-
-    # Accent colour for the left border based on conviction
     accent_col = ("#16a34a" if conviction_label in ("High", "Very High")
                   else "#d97706" if conviction_label == "Moderate"
                   else "#dc2626")
@@ -778,8 +679,7 @@ with tab1:
           </div>
         </div>
         <div style="text-align:right;">
-          <div style="color:#6b7280; font-size:13px; margin-bottom:4px;">
-            CURRENT REGIME</div>
+          <div style="color:#6b7280; font-size:13px; margin-bottom:4px;">CURRENT REGIME</div>
           <div style="background:{regime_col}18; border:1px solid {regime_col};
                       border-radius:8px; padding:8px 20px; display:inline-block;">
             <span style="color:{regime_col}; font-size:20px; font-weight:700;">
@@ -792,13 +692,11 @@ with tab1:
 
     # ── ETF probability bars ──────────────────────────────────────────────────
     st.subheader("P(Beat Cash) — Next 5 Days")
-
     base_rates = {t: 0.5 for t in TARGET_ETFS}
-
-    row1_etfs = TARGET_ETFS[:4]
-    row2_etfs = TARGET_ETFS[4:]
-    prob_row1 = st.columns(len(row1_etfs))
-    prob_row2 = st.columns(len(row2_etfs))
+    row1_etfs  = TARGET_ETFS[:4]
+    row2_etfs  = TARGET_ETFS[4:]
+    prob_row1  = st.columns(len(row1_etfs))
+    prob_row2  = st.columns(len(row2_etfs))
 
     for row_etfs, row_cols in [(row1_etfs, prob_row1), (row2_etfs, prob_row2)]:
         for col, etf in zip(row_cols, row_etfs):
@@ -813,9 +711,7 @@ with tab1:
                 delta_color="normal"
             )
 
-    # ═════════════════════════════════════════════════════════════════════════
-    # PERFORMANCE METRICS
-    # ═════════════════════════════════════════════════════════════════════════
+    # ── Performance metrics ───────────────────────────────────────────────────
     st.divider()
     st.subheader("📊 Backtest Performance")
 
@@ -826,10 +722,10 @@ with tab1:
               delta=f"{excess:+.1f}pp vs T-Bill")
     c2.metric("📊 Sharpe",
               f"{metrics.get('sharpe',0):.2f}",
-              delta="Above 1.0 ✓" if metrics.get("sharpe",0) > 1 else "Below 1.0")
+              delta="Above 1.0 ✓" if metrics.get("sharpe", 0) > 1 else "Below 1.0")
     c3.metric("🎯 Hit Ratio (Full)",
               f"{metrics.get('hit_ratio',0)*100:.0f}%",
-              delta="Strong" if metrics.get("hit_ratio",0) > 0.6 else "Weak")
+              delta="Strong" if metrics.get("hit_ratio", 0) > 0.6 else "Weak")
     c4.metric("📉 Max Drawdown",
               f"{metrics.get('max_dd',0)*100:.2f}%",
               delta="Peak to Trough")
@@ -845,22 +741,12 @@ with tab1:
     c6.metric("🏆 Calmar",
               f"{metrics.get('calmar',0):.2f}",
               delta=f"MaxDD on {dd_date}")
-    c7.metric("✅ Avg Win",
-              f"{metrics.get('avg_win',0)*100:.2f}%",
-              delta="Daily")
-    c8.metric("❌ Avg Loss",
-              f"{metrics.get('avg_loss',0)*100:.2f}%",
-              delta="Daily")
-    c9.metric("⚖️ Win/Loss",
-              f"{metrics.get('win_loss_r',0):.2f}x",
-              delta="Ratio")
-    c10.metric("📅 Test Days",
-               f"{metrics.get('n_days',0):,}",
-               delta="Trading Days")
+    c7.metric("✅ Avg Win",  f"{metrics.get('avg_win',0)*100:.2f}%",  delta="Daily")
+    c8.metric("❌ Avg Loss", f"{metrics.get('avg_loss',0)*100:.2f}%", delta="Daily")
+    c9.metric("⚖️ Win/Loss", f"{metrics.get('win_loss_r',0):.2f}x",  delta="Ratio")
+    c10.metric("📅 Test Days", f"{metrics.get('n_days',0):,}", delta="Trading Days")
 
-    # ═════════════════════════════════════════════════════════════════════════
-    # EQUITY CURVE
-    # ═════════════════════════════════════════════════════════════════════════
+    # ── Equity curve ──────────────────────────────────────────────────────────
     st.divider()
     st.subheader("📈 Equity Curve")
 
@@ -902,28 +788,22 @@ with tab1:
     ))
 
     fig.update_layout(
-        template="plotly_white",
-        height=420,
+        template="plotly_white", height=420,
         margin=dict(l=0, r=0, t=20, b=0),
-        legend=dict(orientation="h", yanchor="bottom", y=1.02,
-                    xanchor="right", x=1),
+        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
         xaxis=dict(showgrid=False),
-        yaxis=dict(showgrid=True, gridcolor="#eeeeee",
-                   title="Cumulative Return (×)"),
+        yaxis=dict(showgrid=True, gridcolor="#eeeeee", title="Cumulative Return (×)"),
         hovermode="x unified",
     )
     st.plotly_chart(fig, use_container_width=True)
 
-    # ═════════════════════════════════════════════════════════════════════════
-    # REGIME TIMELINE
-    # ═════════════════════════════════════════════════════════════════════════
+    # ── Regime timeline ───────────────────────────────────────────────────────
     if "Regime_Name" in df.columns:
         st.divider()
         st.subheader("🗺️ Market Regime Timeline")
 
-        regime_df = df[["Regime_Name"]].reindex(plot_dates).ffill()
-        fig_r     = go.Figure()
-
+        regime_df   = df[["Regime_Name"]].reindex(plot_dates).ffill()
+        fig_r       = go.Figure()
         regime_list = regime_df["Regime_Name"].unique()
         for rname in regime_list:
             mask = regime_df["Regime_Name"] == rname
@@ -931,37 +811,27 @@ with tab1:
                 x=regime_df.index[mask],
                 y=[rname] * mask.sum(),
                 mode="markers",
-                marker=dict(
-                    symbol="square",
-                    size=6,
-                    color=regime_colour(str(rname)),
-                ),
+                marker=dict(symbol="square", size=6, color=regime_colour(str(rname))),
                 name=str(rname),
                 hovertemplate=f"%{{x|%Y-%m-%d}}<br>{rname}<extra></extra>",
             ))
-
         fig_r.update_layout(
-            template="plotly_white",
-            height=180,
+            template="plotly_white", height=180,
             margin=dict(l=0, r=0, t=10, b=0),
             showlegend=True,
-            legend=dict(orientation="h", yanchor="bottom", y=1.02,
-                        xanchor="right", x=1),
+            legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
             xaxis=dict(showgrid=False),
             yaxis=dict(showgrid=False),
         )
         st.plotly_chart(fig_r, use_container_width=True)
 
-    # ═════════════════════════════════════════════════════════════════════════
-    # AUDIT TRAIL
-    # ═════════════════════════════════════════════════════════════════════════
+    # ── Audit trail ───────────────────────────────────────────────────────────
     st.divider()
     st.subheader("📋 Audit Trail — Last 30 Trading Days")
 
     if days_stale > 1:
         st.caption(
-            f"⚠️ Showing data through **{pred_last_date}** — pipeline hasn't run since then. "
-            "Rows up to today will appear once the next pipeline run completes."
+            f"⚠️ Showing data through **{pred_last_date}** — pipeline hasn't run since then."
         )
 
     if audit_trail:
@@ -970,8 +840,8 @@ with tab1:
         def style_signal(val):
             if val == "CASH":
                 return "color: #888888"
-            colours = {"TLT":"#00bfff","VNQ":"#ffd700","SLV":"#c0c0c0",
-                       "GLD":"#ffa500","LQD":"#88ddff","HYG":"#ff9966"}
+            colours = {"TLT": "#00bfff", "VNQ": "#ffd700", "SLV": "#c0c0c0",
+                       "GLD": "#ffa500", "LQD": "#88ddff", "HYG": "#ff9966"}
             return f"color: {colours.get(val, '#ffffff')}; font-weight: 600"
 
         def style_regime(val):
@@ -1008,11 +878,8 @@ with tab1:
     else:
         st.info("No audit trail available yet.")
 
-    # ═════════════════════════════════════════════════════════════════════════
-    # FEATURE IMPORTANCE / MOMENTUM WEIGHTS
-    # ═════════════════════════════════════════════════════════════════════════
+    # ── Momentum weights ──────────────────────────────────────────────────────
     st.divider()
-
     if use_momentum:
         st.subheader("⚖️ Option B — Momentum Score Weights")
         weights_data = {
@@ -1022,32 +889,28 @@ with tab1:
                 "OBV Accumulation 21d (×0.15)",
                 "Breakout vs 20d Range (×0.15)",
             ],
-            "Weight": [0.40, 0.30, 0.20, 0.10, 0.15, 0.15],
-            "Category": ["Momentum","Momentum","Momentum","Momentum","Volume","Breakout"],
+            "Weight":   [0.40, 0.30, 0.20, 0.10, 0.15, 0.15],
+            "Category": ["Momentum", "Momentum", "Momentum", "Momentum", "Volume", "Breakout"],
         }
-        wdf = pd.DataFrame(weights_data)
+        wdf   = pd.DataFrame(weights_data)
         fig_i = go.Figure(go.Bar(
             x=wdf["Weight"],
             y=wdf["Component"],
             orientation="h",
-            marker_color=["#00d1b2"]*4 + ["#ffa500"] + ["#ff6b6b"],
+            marker_color=["#00d1b2"] * 4 + ["#ffa500"] + ["#ff6b6b"],
             hovertemplate="%{y}<br>Weight: %{x:.2f}<extra></extra>",
         ))
         fig_i.update_layout(
-            template="plotly_white",
-            height=300,
+            template="plotly_white", height=300,
             margin=dict(l=0, r=0, t=10, b=0),
             xaxis=dict(title="Weight", showgrid=True, gridcolor="#eeeeee"),
             yaxis=dict(autorange="reversed", showgrid=False),
         )
         st.plotly_chart(fig_i, use_container_width=True)
 
-    # ═════════════════════════════════════════════════════════════════════════
-    # SIGNALS HISTORY
-    # ═════════════════════════════════════════════════════════════════════════
+    # ── Signal history ────────────────────────────────────────────────────────
     st.divider()
     st.subheader("📡 Signal History (from Hugging Face)")
-
     try:
         sig_df = cached_load_signals()
         if sig_df is not None and not sig_df.empty:
@@ -1058,68 +921,34 @@ with tab1:
     except Exception as e:
         st.info(f"Could not load signal history: {e}")
 
-    # ═════════════════════════════════════════════════════════════════════════
-    # METHODOLOGY
-    # ═════════════════════════════════════════════════════════════════════════
+    # ── Methodology ───────────────────────────────────────────────────────────
     st.divider()
     with st.expander("📖 Methodology", expanded=False):
         st.markdown(f"""
     <div style="font-size:14px;line-height:1.7;color:#ccc;">
-
-    <h4 style="color:#00d1b2;margin-top:0;">
-    🏗️ Layer 1 — Wasserstein k-means Regime Detection</h4>
+    <h4 style="color:#00d1b2;margin-top:0;">🏗️ Layer 1 — Wasserstein k-means Regime Detection</h4>
     <p>Based on <em>"Clustering Market Regimes Using the Wasserstein Distance"</em>
     (Horvath, Issa, Muguruza, 2021 —
     <a href="https://papers.ssrn.com/sol3/papers.cfm?abstract_id=3947905"
     style="color:#00d1b2;">SSRN 3947905</a>).</p>
-    <p>Each rolling {20}-day window of ETF returns is treated as an empirical
-    probability distribution. The <b>Wasserstein distance</b> (Earth Mover's Distance)
-    measures how far apart two such distributions are — accounting for shape,
-    not just mean and variance. This is mathematically superior to standard
-    k-means on moments and outperforms Hidden Markov Models on non-Gaussian
-    financial returns.</p>
-    <p>Optimal k (number of regimes) is auto-selected via MMD scoring.
-    Current model: <b>k={detector.optimal_k_ if detector else '?'}</b> regimes —
+    <p>Current model: <b>k={detector.optimal_k_ if detector else '?'}</b> regimes —
     {', '.join(detector.regime_names_.values()) if detector and detector.regime_names_ else 'loading...'}</p>
-
     <h4 style="color:#00d1b2;">📈 Layer 2 — Momentum Ranking</h4>
-    <p>A pure rules-based composite momentum score ranks all 6 ETFs each day.
-    The top-ranked ETF with sufficient conviction (Z ≥ threshold) is selected.</p>
     <ul>
-      <li><b>Rate-of-Change (RoC):</b> 40% × 5d + 30% × 10d + 20% × 21d + 10% × 63d</li>
-      <li><b>OBV accumulation:</b> 15% weight — volume-weighted momentum confirmation</li>
-      <li><b>20d Breakout score:</b> 15% weight — position within rolling high/low range</li>
-      <li>Scores Z-normalised cross-sectionally across all 6 ETFs each day</li>
+      <li><b>RoC:</b> 40%×5d + 30%×10d + 20%×21d + 10%×63d</li>
+      <li><b>OBV accumulation:</b> 15% weight</li>
+      <li><b>20d Breakout score:</b> 15% weight</li>
     </ul>
-
     <h4 style="color:#00d1b2;">⚡ Strategy Execution</h4>
     <ul>
-      <li><b>Conviction gate:</b> Z ≥ {DEFAULT_Z_MIN}σ required to enter — below threshold holds CASH
-          earning {rf_rate*100:.2f}% annualised</li>
-      <li><b>Stop-loss:</b> 2-day cumulative loss ≤ {stop_loss_pct*100:.0f}% → CASH
-          until Z ≥ {z_reentry:.1f}σ</li>
+      <li><b>Conviction gate:</b> Z ≥ {DEFAULT_Z_MIN}σ required to enter</li>
+      <li><b>Stop-loss:</b> 2-day cumulative loss ≤ {stop_loss_pct*100:.0f}% → CASH until Z ≥ {z_reentry:.1f}σ</li>
       <li><b>Transaction cost:</b> {fee_bps}bps per one-way trade</li>
     </ul>
-
-    <h4 style="color:#00d1b2;">🔄 Daily Pipeline</h4>
-    <p>GitHub Actions runs at 6:30am EST every weekday:
-    fetch new data → detect regime → fit momentum ranker → generate signal →
-    push to Hugging Face Dataset. Walk-forward OOS predictions refresh monthly.
-    This UI is read-only — loads pre-computed signals from Hugging Face at runtime.</p>
-
-    <h4 style="color:#00d1b2;">📅 Banner Date Logic</h4>
-    <p>The "Next Trading Day Signal" date in the hero banner is always computed
-    from <b>today's EST clock</b>, not from the prediction history file.
-    This means the date is always correct even when the pipeline is behind.
-    A staleness warning appears when pred_history is more than 1 day old.</p>
-
     <h4 style="color:#ff6b6b;">⚠️ Important Caveats</h4>
     <ul>
       <li>Past performance does not guarantee future results</li>
-      <li>Backtest includes transaction costs but not slippage or
-          liquidity constraints</li>
       <li>This is a research tool, not investment advice</li>
     </ul>
-
     </div>
     """, unsafe_allow_html=True)
