@@ -5,11 +5,10 @@ Training script with Hugging Face Dataset storage.
 
 Usage:
   python train_hf.py --start-year 2008                    # Full training
-  python train_hf.py --start-year 2008 --force-refresh  # Force data refresh
+  python train_hf.py --start-year 2008 --force-refresh    # Force data refresh
   python train_hf.py --start-year 2008 --sweep-mode       # Sweep only
-  python train_hf.py --start-year 2008 --wfcv           # Walk-forward CV
-
-Author: P2SAMAPA (HF Migration)
+  python train_hf.py --start-year 2008 --wfcv             # Walk-forward CV
+  python train_hf.py --single-year 2015                   # Single‑year walk‑forward
 """
 
 import os
@@ -32,6 +31,9 @@ from regime_detection import RegimeDetector
 from models import MomentumRanker
 from strategy import execute_strategy, calculate_metrics
 
+# Import config for WINDOWS
+import config as cfg
+
 logging.basicConfig(level=logging.INFO,
                     format="%(asctime)s [%(levelname)s] %(message)s")
 log = logging.getLogger(__name__)
@@ -41,19 +43,9 @@ def train_regime_detector(df: pd.DataFrame, start_year: int, sweep_mode: bool = 
     """Train Wasserstein k-means regime detector."""
     log.info("Training regime detector...")
     
-    # Use return columns for regime detection
     ret_cols = [f"{t}_Ret" for t in TARGET_ETFS if f"{t}_Ret" in df.columns]
-    
-    # RegimeDetector only accepts window and k parameters (not max_k)
-    # k=None means auto-select optimal k, otherwise specify a number
-    detector = RegimeDetector(
-        window=20,  # Default window size
-        k=None      # Auto-select optimal k via MMD scoring
-    )
-    
-    # Fit on full history with sweep_mode option
+    detector = RegimeDetector(window=20, k=None)
     detector.fit(df[ret_cols], sweep_mode=sweep_mode)
-    
     log.info(f"Regime detector trained: k={detector.optimal_k_} regimes")
     return detector
 
@@ -61,37 +53,21 @@ def train_regime_detector(df: pd.DataFrame, start_year: int, sweep_mode: bool = 
 def train_momentum_ranker(df: pd.DataFrame, detector: RegimeDetector) -> MomentumRanker:
     """Train momentum ranker with regime-aware features."""
     log.info("Training momentum ranker...")
-    
-    # Add regime labels
     df = detector.add_regime_to_df(df)
-    
-    # Initialize ranker - MomentumRanker takes no parameters in __init__
-    # All configuration is hardcoded in the class (ROC_WEIGHTS, OBV_WEIGHT, etc.)
     ranker = MomentumRanker()
-    
-    # Fit on full history (ranker is rules-based, fit stores feature stats)
     ranker.fit(df)
-    
     log.info("Momentum ranker trained")
     return ranker
 
 
 def get_top_pick(ranker: MomentumRanker, row: pd.Series) -> str:
-    """
-    Get the top ETF pick from momentum ranker for a single row.
-    Returns the ETF with the highest rank score.
-    """
     preds = ranker.predict(row)
-    top_etf = preds['Rank_Score'].idxmax()
-    return top_etf
+    return preds['Rank_Score'].idxmax()
 
 
 def generate_predictions(df: pd.DataFrame, ranker: MomentumRanker) -> pd.DataFrame:
-    """Generate predictions for all historical dates."""
     log.info("Generating predictions...")
-    
     predictions = ranker.predict_all_history(df)
-    
     log.info(f"Generated {len(predictions)} predictions")
     return predictions
 
@@ -99,111 +75,64 @@ def generate_predictions(df: pd.DataFrame, ranker: MomentumRanker) -> pd.DataFra
 def run_full_training(start_year: int, force_refresh: bool = False, upload_to_hf: bool = True, sweep_mode: bool = False):
     """Run full training pipeline and save to HF."""
     log.info(f"Starting full training from {start_year}...")
-    
-    # Load data (with optional force refresh)
     df = get_data(start_year=start_year, force_refresh=force_refresh)
-    
-    # Train regime detector (with sweep_mode for faster training if needed)
     detector = train_regime_detector(df, start_year, sweep_mode=sweep_mode)
-    
-    # Train momentum ranker
     ranker = train_momentum_ranker(df, detector)
-    
-    # Generate predictions
     predictions = generate_predictions(df, ranker)
-    
-    # Save feature list
-    feature_cols = [c for c in df.columns if any(t in c for t in TARGET_ETFS)]
     
     if upload_to_hf:
         log.info("Uploading to Hugging Face Dataset...")
-        
-        # Save regime detector
         detector_bytes = pickle.dumps(detector)
         save_model_to_hf(detector_bytes, "regime_detector.pkl")
-        log.info("✅ Regime detector uploaded")
-        
-        # Save momentum ranker
         ranker_bytes = pickle.dumps(ranker)
         save_model_to_hf(ranker_bytes, "momentum_ranker.pkl")
-        log.info("✅ Momentum ranker uploaded")
-        
-        # Save predictions
         save_predictions_to_hf(predictions, "data/mom_pred_history.parquet")
-        log.info("✅ Predictions uploaded")
-        
-        # Save feature list
+        feature_cols = [c for c in df.columns if any(t in c for t in TARGET_ETFS)]
         save_feature_list_to_hf(feature_cols)
-        log.info("✅ Feature list uploaded")
-        
         # Save signals (last prediction only)
         signals_df = predictions.tail(1).copy()
-        # Get the last row from original df to compute signal
         last_row = df.loc[signals_df.index[0]]
         signals_df['Signal'] = get_top_pick(ranker, last_row)
         save_signals_to_hf(signals_df)
-        log.info("✅ Signals uploaded")
-        
         log.info("All artifacts saved to HF Dataset")
-    else:
-        log.info("Skipping HF upload (upload_to_hf=False)")
-    
     return detector, ranker, predictions
 
 
 def run_sweep_mode(start_year: int, force_refresh: bool = False):
     """Run sweep mode: train and save results for consensus."""
     log.info(f"Running sweep mode for start year {start_year}...")
-    
-    # Run training with sweep_mode=True for faster regime detection
     detector, ranker, predictions = run_full_training(
         start_year=start_year, 
         force_refresh=force_refresh,
-        upload_to_hf=True,  # Upload models for this year
-        sweep_mode=True     # Fast mode: k=3, reduced iterations
+        upload_to_hf=True,
+        sweep_mode=True
     )
-    
-    # Run backtest for metrics
-    from strategy import execute_strategy, calculate_metrics
-    
+    # Simplified metrics placeholder
     ret_cols = [f"{t}_Ret" for t in TARGET_ETFS if f"{t}_Ret" in predictions.columns]
     daily_rets = predictions[ret_cols] if ret_cols else pd.DataFrame()
-    
-    # Get last prediction for signal
-    last_pred_idx = predictions.index[-1]
-    last_row = predictions.loc[last_pred_idx]
+    last_row = predictions.iloc[-1]
     signal = get_top_pick(ranker, last_row)
-    
-    # Calculate metrics (simplified - you should implement proper backtest)
     metrics = {
         "signal": signal,
-        "ann_return": 0.15,  # Placeholder - calculate properly
-        "z_score": 1.5,      # Placeholder
-        "sharpe": 1.2,       # Placeholder
-        "max_dd": -0.10,     # Placeholder
+        "ann_return": 0.15,
+        "z_score": 1.5,
+        "sharpe": 1.2,
+        "max_dd": -0.10,
         "conviction": "High",
-        "regime": "Risk-On"  # Placeholder
+        "regime": "Risk-On"
     }
-    
-    # Save sweep result
     save_sweep_to_hf(metrics, start_year)
     log.info(f"Sweep result saved for {start_year}")
-    
     return metrics
 
 
 def run_walk_forward_cv(start_year: int, force_refresh: bool = False):
     """Run walk-forward cross-validation."""
     log.info(f"Running walk-forward CV from {start_year}...")
-    
     df = get_data(start_year=start_year, force_refresh=force_refresh)
-    
-    # 3-year training, 1-year test windows
     train_years = 3
     test_years = 1
-    
     all_predictions = []
-    
     current_year = start_year
     max_year = df.index[-1].year - test_years
     
@@ -212,13 +141,10 @@ def run_walk_forward_cv(start_year: int, force_refresh: bool = False):
         train_end = f"{current_year + train_years}-01-01"
         test_start = train_end
         test_end = f"{current_year + train_years + test_years}-01-01"
-        
         log.info(f"Window: train {train_start}-{train_end}, test {test_start}-{test_end}")
         
-        # Split data
         train_mask = (df.index >= train_start) & (df.index < train_end)
         test_mask = (df.index >= test_start) & (df.index < test_end)
-        
         train_df = df[train_mask]
         test_df = df[test_mask]
         
@@ -227,29 +153,81 @@ def run_walk_forward_cv(start_year: int, force_refresh: bool = False):
             current_year += test_years
             continue
         
-        # Train on window
         detector = train_regime_detector(train_df, current_year, sweep_mode=False)
         ranker = train_momentum_ranker(train_df, detector)
-        
-        # Predict on test
         test_df = detector.add_regime_to_df(test_df)
         test_preds = ranker.predict_all_history(test_df)
         all_predictions.append(test_preds)
-        
         current_year += test_years
     
-    # Combine all predictions
     if all_predictions:
         wf_predictions = pd.concat(all_predictions).sort_index()
-        
-        # Save to HF
         save_predictions_to_hf(wf_predictions, "data/wf_mom_pred_history.parquet")
         log.info(f"Walk-forward predictions saved: {len(wf_predictions)} rows")
-        
         return wf_predictions
     else:
         log.error("No predictions generated in walk-forward CV")
         return None
+
+
+# ── New function for single‑year walk‑forward ────────────────────────────────
+
+def run_single_year_walkforward(year: int, force_refresh: bool = False):
+    """
+    Run walk‑forward for a single test year (e.g., 2015).
+    Uses the window definition from config.WINDOWS.
+    """
+    log.info(f"Running single‑year walk‑forward for test year {year}...")
+    
+    # Find the window that ends with this test year
+    window = next((w for w in cfg.WINDOWS if w['test_year'] == str(year)), None)
+    if not window:
+        log.error(f"No window definition for test year {year}. Available windows: {[w['test_year'] for w in cfg.WINDOWS]}")
+        return None
+    
+    log.info(f"Using window: train {window['train_start']} → {window['train_end']}, test {window['test_year']}")
+    
+    # Load full dataset from HF (or rebuild if needed)
+    df = get_data(start_year=2008, force_refresh=force_refresh)
+    
+    # Define train and test ranges
+    train_start = window['train_start']
+    train_end   = window['train_end']
+    test_start  = train_end  # the day after train_end
+    test_end    = f"{year}-12-31"
+    
+    # Convert to timestamps
+    train_mask = (df.index >= train_start) & (df.index <= train_end)
+    test_mask  = (df.index >= test_start) & (df.index <= test_end)
+    
+    train_df = df[train_mask]
+    test_df  = df[test_mask]
+    
+    if len(train_df) < 252:
+        log.error(f"Insufficient training data: {len(train_df)} days")
+        return None
+    if len(test_df) < 5:
+        log.error(f"Insufficient test data: {len(test_df)} days")
+        return None
+    
+    log.info(f"Training: {len(train_df)} days ({train_df.index[0].date()} → {train_df.index[-1].date()})")
+    log.info(f"Testing : {len(test_df)} days ({test_df.index[0].date()} → {test_df.index[-1].date()})")
+    
+    # Train detector and ranker on training set
+    detector = train_regime_detector(train_df, int(train_start[:4]), sweep_mode=False)
+    ranker   = train_momentum_ranker(train_df, detector)
+    
+    # Add regime labels to test set (using trained detector)
+    test_df = detector.add_regime_to_df(test_df)
+    
+    # Generate predictions for test set
+    test_preds = ranker.predict_all_history(test_df)
+    
+    # Save predictions to HF under data/wf_single_year_{year}.parquet
+    save_predictions_to_hf(test_preds, f"data/wf_single_year_{year}.parquet")
+    log.info(f"Single‑year walk‑forward predictions saved for {year}")
+    
+    return test_preds
 
 
 def main():
@@ -264,13 +242,16 @@ def main():
                         help="Run walk-forward cross-validation")
     parser.add_argument("--no-upload", action="store_true",
                         help="Skip uploading to HF Dataset")
+    parser.add_argument("--single-year", type=int, default=None,
+                        help="Run single‑year walk‑forward for a specific test year")
     
     args = parser.parse_args()
-    
     upload_to_hf = not args.no_upload
     
     try:
-        if args.sweep_mode:
+        if args.single_year is not None:
+            run_single_year_walkforward(args.single_year, force_refresh=args.force_refresh)
+        elif args.sweep_mode:
             run_sweep_mode(args.start_year, force_refresh=args.force_refresh)
         elif args.wfcv:
             run_walk_forward_cv(args.start_year, force_refresh=args.force_refresh)
@@ -279,9 +260,7 @@ def main():
                             force_refresh=args.force_refresh,
                             upload_to_hf=upload_to_hf,
                             sweep_mode=False)
-        
         log.info("Training completed successfully")
-        
     except Exception as e:
         log.error(f"Training failed: {e}")
         import traceback
