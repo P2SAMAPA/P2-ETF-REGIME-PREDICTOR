@@ -340,11 +340,9 @@ def _compute_consensus(sweep_data):
         etf_agg[e]["sharpes"].append(row["sharpe"])
         etf_agg[e]["dds"].append(row["max_dd"])
     summary = {}
-    total = sum(v["cum_score"] for v in etf_agg.values())
     for e, v in etf_agg.items():
         summary[e] = {
             "cum_score":   float(sum(v["scores"])),
-            "score_share": round(sum(v["scores"]) / total, 3) if total > 0 else 0,
             "n_years":     len(v["years"]),
             "years":       v["years"],
             "avg_return":  round(float(np.mean(v["returns"])), 4),
@@ -352,10 +350,12 @@ def _compute_consensus(sweep_data):
             "avg_sharpe":  round(float(np.mean(v["sharpes"])), 3),
             "avg_max_dd":  round(float(np.mean(v["dds"])), 4),
         }
+    total = sum(s["cum_score"] for s in summary.values())
+    for e, s in summary.items():
+        s["score_share"] = round(s["cum_score"] / total, 3) if total > 0 else 0
     winner_etf = max(summary, key=lambda e: summary[e]["cum_score"])
     return {"winner": winner_etf, "etf_summary": summary,
             "per_year": df_c.to_dict("records"), "n_years": len(rows)}
-
 ETF_COLORS_SW = {
     "TLT": "#4e79a7", "VNQ": "#76b7b2", "SLV": "#edc948", "GLD": "#b07aa1",
     "LQD": "#59a14f", "HYG": "#e15759", "CASH": "#aaaaaa",
