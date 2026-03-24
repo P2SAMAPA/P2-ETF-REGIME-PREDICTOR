@@ -2,7 +2,10 @@
 # ==================================
 # Streamlit UI for the Wasserstein Regime-Aware ETF Rotation Model.
 # 
-# (Original content preserved; added single‑year on‑demand feature.)
+# Tabs:
+#   1. Single‑Year Results (on‑demand walk‑forward for a specific test year)
+#   2. Walk‑Forward CV Results (monthly refresh from daily pipeline)
+#   3. Multi‑Year Consensus Sweep (daily sweep results)
 
 import streamlit as st
 import pandas as pd
@@ -137,9 +140,8 @@ def cached_load_signals():
     except Exception:
         return pd.DataFrame()
 
-# ── Single‑year on‑demand helpers ────────────────────────────────────────────
+# ── Single‑year on‑demand helpers (unchanged) ────────────────────────────────
 def load_single_year_result(year: int) -> pd.DataFrame:
-    """Load pre‑computed single‑year walk‑forward predictions from HF."""
     try:
         path = hf_hub_download(
             repo_id=HF_DATASET_REPO,
@@ -158,7 +160,6 @@ def load_single_year_result(year: int) -> pd.DataFrame:
         return pd.DataFrame()
 
 def trigger_single_year_workflow(year: int) -> tuple[bool, str]:
-    """Trigger GitHub Actions workflow for a specific year."""
     if not GH_PAT:
         return False, "GH_PAT secret not set in Streamlit"
     url = f"https://api.github.com/repos/{GITHUB_REPO}/actions/workflows/single_year_walkforward.yml/dispatches"
@@ -356,19 +357,24 @@ def _compute_consensus(sweep_data):
     winner_etf = max(summary, key=lambda e: summary[e]["cum_score"])
     return {"winner": winner_etf, "etf_summary": summary,
             "per_year": df_c.to_dict("records"), "n_years": len(rows)}
+
 ETF_COLORS_SW = {
     "TLT": "#4e79a7", "VNQ": "#76b7b2", "SLV": "#edc948", "GLD": "#b07aa1",
     "LQD": "#59a14f", "HYG": "#e15759", "CASH": "#aaaaaa",
 }
 
 # ── Tabs ──────────────────────────────────────────────────────────────────────
-tab1, tab2 = st.tabs(["📊 Single‑Year Results", "🔄 Multi‑Year Consensus Sweep"])
+tab1, tab2, tab3 = st.tabs([
+    "📊 Single‑Year Results",
+    "📅 Walk‑Forward CV Results",
+    "🔄 Multi‑Year Consensus Sweep"
+])
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# TAB 1 — Single‑Year Results (original global backtest + new on‑demand)
+# TAB 1 — Single‑Year Results (on‑demand, fixed window)
 # ═══════════════════════════════════════════════════════════════════════════════
 with tab1:
-    # ── Single‑year on‑demand runner (new) ───────────────────────────────────
+    # ── Single‑year on‑demand runner ──────────────────────────────────────────
     available_years = [2011, 2012, 2013, 2014, 2015, 2016, 2017, 2018, 2019, 2020, 2021, 2022, 2023, 2024]
     selected_year = st.selectbox(
         "🔍 Walk‑Forward for a specific year (cache will be used if available)",
@@ -523,7 +529,7 @@ with tab1:
                 icon="📅"
             )
 
-        # ── Hero banner ───────────────────────────────────────────────────────
+        # ── Hero banner (font sizes increased) ─────────────────────────────────
         st.divider()
         regime_name = df_bt["Regime_Name"].iloc[-1] if "Regime_Name" in df_bt.columns else "?"
         regime_col = regime_colour(regime_name)
@@ -539,21 +545,21 @@ with tab1:
                     box-shadow:0 1px 3px rgba(0,0,0,0.1);">
           <div style="display:flex; justify-content:space-between; align-items:center;">
             <div>
-              <div style="font-size:12px; color:#6b7280; letter-spacing:1px;">
+              <div style="font-size:16px; color:#6b7280; letter-spacing:1px;">
                 NEXT TRADING DAY SIGNAL — {true_next_date.strftime('%A %b %d, %Y')}
               </div>
-              <div style="font-size:44px; font-weight:800; color:#1a1a2e; line-height:1.2;">
+              <div style="font-size:56px; font-weight:800; color:#1a1a2e; line-height:1.2;">
                 {next_signal}
               </div>
-              <div style="font-size:14px; color:#6b7280; margin-top:4px;">
+              <div style="font-size:16px; color:#6b7280; margin-top:4px;">
                 Conviction: {conviction_label} | Z = {conviction_z:.2f}σ
               </div>
             </div>
             <div style="text-align:right;">
-              <div style="color:#6b7280; font-size:13px; margin-bottom:4px;">CURRENT REGIME</div>
+              <div style="color:#6b7280; font-size:14px; margin-bottom:4px;">CURRENT REGIME</div>
               <div style="background:{regime_col}18; border:1px solid {regime_col};
                           border-radius:8px; padding:8px 20px; display:inline-block;">
-                <span style="color:{regime_col}; font-size:20px; font-weight:700;">
+                <span style="color:{regime_col}; font-size:24px; font-weight:700;">
                   {regime_name}
                 </span>
               </div>
@@ -742,9 +748,233 @@ with tab1:
         st.info("Click **Run Model** in the sidebar to start the backtest.")
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# TAB 2 — Multi‑Year Consensus Sweep (original, unchanged)
+# TAB 2 — Walk‑Forward CV Results (monthly refresh from daily pipeline)
 # ═══════════════════════════════════════════════════════════════════════════════
 with tab2:
+    st.subheader("📅 Walk‑Forward Cross‑Validation Results (Monthly Refresh)")
+    st.caption(
+        "This tab shows the year‑by‑year out‑of‑sample performance from the daily pipeline’s monthly walk‑forward runs. "
+        "Select a test year to see the detailed backtest for that year using the same strategy rules as the global backtest."
+    )
+
+    # Year selector
+    wf_years = [2011, 2012, 2013, 2014, 2015, 2016, 2017, 2018, 2019, 2020, 2021, 2022, 2023, 2024]
+    wf_selected_year = st.selectbox(
+        "Select test year",
+        options=[str(y) for y in wf_years],
+        index=0,
+        help="Choose a year to display the walk‑forward backtest for that year."
+    )
+
+    # Load the walk‑forward predictions file
+    wf_pred = load_wf_momentum_predictions_from_hf()
+    if wf_pred is None:
+        st.warning("Walk‑forward predictions not yet available. Run the daily pipeline (or manual retrain with --wfcv) first.")
+        st.stop()
+
+    # Filter for the selected year
+    year = int(wf_selected_year)
+    start_date = f"{year}-01-01"
+    end_date   = f"{year}-12-31"
+    wf_year = wf_pred.loc[start_date:end_date]
+    if wf_year.empty:
+        st.error(f"No predictions found for {year}. The walk‑forward file may not cover that year.")
+        st.stop()
+
+    st.success(f"Loaded {len(wf_year)} trading days for {year}")
+
+    # Load price data to get actual returns for the year
+    try:
+        from data_manager_hf import get_data
+        df = get_data(start_year=2008, force_refresh=False)
+    except Exception as e:
+        st.error(f"Failed to load price data: {e}")
+        st.stop()
+
+    # Align with the year predictions
+    df_year = df.loc[start_date:end_date]
+    # Ensure we have the same dates
+    common = wf_year.index.intersection(df_year.index)
+    if len(common) < 5:
+        st.error("Insufficient overlapping data.")
+        st.stop()
+
+    wf_year = wf_year.loc[common]
+    df_year = df_year.loc[common]
+
+    # Daily returns for the year
+    ret_cols = [f"{t}_Ret" for t in TARGET_ETFS if f"{t}_Ret" in df_year.columns]
+    daily_rets = df_year[ret_cols]
+
+    # Risk‑free rate (use DTB3 if available)
+    if "DTB3" in df_year.columns:
+        rf_rate = float(df_year["DTB3"].iloc[-1] / 100) if not df_year.empty else 0.045
+    else:
+        rf_rate = 0.045
+
+    # Get regime series for the year
+    if "Regime_Name" in df_year.columns:
+        regime_series = df_year["Regime_Name"]
+    else:
+        # Fallback: create dummy
+        regime_series = pd.Series("Unknown", index=df_year.index)
+
+    # Run strategy for this year's predictions
+    try:
+        (strat_rets, audit_trail, _model_next_date, next_signal,
+         conviction_z, conviction_label, last_p) = execute_strategy(
+            predictions_df=wf_year,
+            daily_ret_df=daily_rets,
+            rf_rate=rf_rate,
+            z_reentry=z_reentry,
+            stop_loss_pct=stop_loss,
+            fee_bps=fee_bps,
+            regime_series=regime_series,
+        )
+        metrics = calculate_metrics(strat_rets, rf_rate=rf_rate)
+    except Exception as e:
+        st.error(f"Backtest failed: {e}")
+        st.stop()
+
+    # ── Hero banner (same increased font sizes) ──────────────────────────────
+    st.divider()
+    # Determine current regime from the last day of the year
+    current_regime = regime_series.iloc[-1] if not regime_series.empty else "?"
+    regime_col = regime_colour(current_regime)
+
+    # The signal date for the hero banner is the next trading day after the last date of the year
+    last_date = wf_year.index[-1]
+    true_next_date = _next_trading_day(last_date)
+    # Use the last day's conviction
+    # (We already have next_signal, conviction_z, conviction_label from the strategy)
+    accent_col = ("#16a34a" if conviction_label in ("High", "Very High")
+                  else "#d97706" if conviction_label == "Moderate"
+                  else "#dc2626")
+
+    st.markdown(f"""
+    <div style="background:white; border-left:6px solid {accent_col};
+                border-radius:12px; padding:18px 24px; margin-bottom:24px;
+                box-shadow:0 1px 3px rgba(0,0,0,0.1);">
+      <div style="display:flex; justify-content:space-between; align-items:center;">
+        <div>
+          <div style="font-size:16px; color:#6b7280; letter-spacing:1px;">
+            YEAR‑END SIGNAL — {true_next_date.strftime('%A %b %d, %Y')}
+          </div>
+          <div style="font-size:56px; font-weight:800; color:#1a1a2e; line-height:1.2;">
+            {next_signal}
+          </div>
+          <div style="font-size:16px; color:#6b7280; margin-top:4px;">
+            Conviction: {conviction_label} | Z = {conviction_z:.2f}σ
+          </div>
+        </div>
+        <div style="text-align:right;">
+          <div style="color:#6b7280; font-size:14px; margin-bottom:4px;">CURRENT REGIME</div>
+          <div style="background:{regime_col}18; border:1px solid {regime_col};
+                      border-radius:8px; padding:8px 20px; display:inline-block;">
+            <span style="color:{regime_col}; font-size:24px; font-weight:700;">
+              {current_regime}
+            </span>
+          </div>
+        </div>
+      </div>
+    </div>
+    """, unsafe_allow_html=True)
+
+    # ── ETF probability bars ──────────────────────────────────────────────────
+    st.subheader("P(Beat Cash) — Next 5 Days (end of year)")
+    row1_etfs = TARGET_ETFS[:4]
+    row2_etfs = TARGET_ETFS[4:]
+    prob_row1 = st.columns(len(row1_etfs))
+    prob_row2 = st.columns(len(row2_etfs))
+    base_rates = {t: 0.5 for t in TARGET_ETFS}
+    for row_etfs, row_cols in [(row1_etfs, prob_row1), (row2_etfs, prob_row2)]:
+        for col, etf in zip(row_cols, row_etfs):
+            idx = TARGET_ETFS.index(etf)
+            p_val = last_p[idx] if idx < len(last_p) else 0.5
+            base = base_rates.get(etf, 0.5)
+            col.metric(
+                label=etf,
+                value=f"{p_val:.1%}",
+                delta=f"{p_val - base:+.1%} vs baseline",
+                delta_color="normal" if p_val > base else "inverse"
+            )
+
+    # ── Performance metrics for the year ──────────────────────────────────────
+    st.divider()
+    st.subheader("📊 Performance Metrics for the Year")
+
+    excess = metrics.get("ann_return", 0) - rf_rate
+    col1, col2, col3, col4 = st.columns(4)
+    col1.metric("Ann. Return", f"{metrics.get('ann_return',0)*100:.2f}%",
+                delta=f"{excess*100:+.1f}pp vs T-Bill")
+    col2.metric("Sharpe", f"{metrics.get('sharpe',0):.2f}")
+    col3.metric("Hit Ratio", f"{metrics.get('hit_ratio',0)*100:.0f}%")
+    col4.metric("Max Drawdown", f"{metrics.get('max_dd',0)*100:.2f}%")
+
+    # ── Equity curve for the year ────────────────────────────────────────────
+    st.divider()
+    st.subheader("📈 Equity Curve During the Year")
+    cum_rets = metrics.get("cum_returns", np.array([1]))
+    fig = go.Figure()
+    fig.add_trace(go.Scatter(
+        x=wf_year.index[-len(cum_rets):],
+        y=cum_rets,
+        mode="lines",
+        name="Strategy",
+        line=dict(color="#0e9f6e", width=2.5),
+        fill="tozeroy",
+        fillcolor="rgba(14,159,110,0.1)",
+    ))
+    fig.add_hline(y=1.0, line_dash="dash", line_color="gray", opacity=0.5)
+    fig.update_layout(
+        template="plotly_white", height=420,
+        margin=dict(l=0, r=0, t=20, b=0),
+        xaxis=dict(title="Date"),
+        yaxis=dict(title="Cumulative Return (×)"),
+        hovermode="x unified",
+    )
+    st.plotly_chart(fig, use_container_width=True)
+
+    # ── Audit trail for the year (last 30 days of the year) ───────────────────
+    st.divider()
+    st.subheader("📋 Audit Trail (Last 30 Days of the Year)")
+    if audit_trail:
+        audit_df = pd.DataFrame(audit_trail).tail(30)
+        # same styling as before
+        def style_signal(val):
+            if val == "CASH":
+                return "color: #888888"
+            colours = {"TLT": "#00bfff", "VNQ": "#ffd700", "SLV": "#c0c0c0",
+                       "GLD": "#ffa500", "LQD": "#88ddff", "HYG": "#ff9966"}
+            return f"color: {colours.get(val, '#ffffff')}; font-weight: 600"
+        def style_regime(val):
+            col = regime_colour(val)
+            return f"color: {col}; font-weight: 500"
+        def style_return(val):
+            if isinstance(val, str) and val.endswith("%"):
+                try:
+                    v = float(val.replace("%", ""))
+                    return "color: #00b894; font-weight:600" if v > 0 else "color: #d63031; font-weight:600"
+                except:
+                    pass
+            return ""
+        st.dataframe(
+            audit_df.style
+            .applymap(style_signal, subset=["Signal", "Top_Pick"])
+            .applymap(style_regime, subset=["Regime"])
+            .applymap(style_return, subset=["Signal_Ret%", "TLT_Ret%", "VNQ_Ret%",
+                                            "SLV_Ret%", "GLD_Ret%", "LQD_Ret%", "HYG_Ret%"])
+            .set_properties(**{"text-align": "center"})
+            .hide(axis="index"),
+            use_container_width=True
+        )
+    else:
+        st.info("No audit trail available for this year.")
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# TAB 3 — Multi‑Year Consensus Sweep (original, unchanged)
+# ═══════════════════════════════════════════════════════════════════════════════
+with tab3:
     # ── Consensus sweep UI (original) ────────────────────────────────────────
     st.subheader("Multi‑Year Consensus Sweep")
     st.caption(
