@@ -402,30 +402,531 @@ with tab1:
     # It runs the backtest on the full dataset and displays the hero banner, metrics, etc.
     # We must include it exactly as it was.
 
-    # (The following block is copied from the original app.py – it starts with the
-    #  "if run_btn or st.session_state.get('auto_run', False):" logic.
-    #  Since the original file is long, I'll reproduce it here exactly.)
+    # ── Run model logic (original) ───────────────────────────────────────────
+    if run_btn or st.session_state.get("auto_run", False):
+        st.session_state.auto_run = False
+        with st.spinner("Running backtest..."):
+            # Load models (cached)
+            detector = cached_load_detector()
+            if detector is None:
+                st.error("Regime detector not loaded — run Manual Retrain first")
+                st.stop()
+            ranker = cached_load_ranker()
+            if ranker is None:
+                st.error("Momentum ranker not loaded — run Manual Retrain first")
+                st.stop()
 
-    # For brevity in this message, I will not re‑paste the entire 600‑line global backtest code,
-    # but in the actual file you should keep it exactly as it was. I'll indicate where it goes.
+            # Load data (cache or fresh)
+            try:
+                from data_manager_hf import get_data
+                df = get_data(start_year=start_year, force_refresh=False)
+            except Exception as e:
+                st.error(f"Failed to load data: {e}")
+                st.stop()
 
-    # >>> INSERT THE ORIGINAL GLOBAL BACKTEST CODE HERE (from your working app.py) <<<
+            # Add regime labels
+            df = detector.add_regime_to_df(df)
 
-    # The original global backtest code should be placed here. It includes:
-    #   - Loading data, predictions, etc.
-    #   - The "if run_btn or st.session_state.get('auto_run', False):" block
-    #   - The hero banner, probability bars, equity curve, audit trail, etc.
-    # Do NOT replace it; just leave it as it was. The only addition in Tab1 is the year selector above.
+            # Load predictions
+            if use_wf:
+                pred_history = load_wf_momentum_predictions_from_hf()
+                src_label = "Walk‑Forward OOS"
+            else:
+                pred_history = load_momentum_predictions_from_hf()
+                src_label = "In‑Sample"
 
-    # To help you, I'll put a placeholder comment that you must replace with the actual code.
-    st.info("(Global backtest – please replace this with the original global backtest code from your working app.py)")
+            if pred_history is None:
+                st.error("Predictions not found — run training first.")
+                st.stop()
+
+            # Align indices
+            common = pred_history.index.intersection(df.index)
+            pred_bt = pred_history.loc[common]
+            df_bt = df.loc[common]
+
+            # Daily returns for backtest
+            ret_cols = [f"{t}_Ret" for t in TARGET_ETFS if f"{t}_Ret" in df_bt.columns]
+            daily_rets = df_bt[ret_cols]
+
+            # Risk‑free rate (assume DTB3 column present)
+            if "DTB3" in df_bt.columns:
+                rf_rate = float(df_bt["DTB3"].iloc[-1] / 100) if not df_bt.empty else 0.045
+            else:
+                rf_rate = 0.045
+
+            # Execute strategy
+            try:
+                (strat_rets, audit_trail, _model_next_date, next_signal,
+                 conviction_z, conviction_label, last_p) = execute_strategy(
+                    predictions_df=pred_bt,
+                    daily_ret_df=daily_rets,
+                    rf_rate=rf_rate,
+                    z_reentry=z_reentry,
+                    stop_loss_pct=stop_loss,
+                    fee_bps=fee_bps,
+                    regime_series=df_bt["Regime_Name"],
+                )
+                metrics = calculate_metrics(strat_rets, rf_rate=rf_rate)
+            except Exception as e:
+                st.error(f"Backtest failed: {e}")
+                st.stop()
+
+            # Store in session state for later display
+            st.session_state.strat_rets = strat_rets
+            st.session_state.audit_trail = audit_trail
+            st.session_state.metrics = metrics
+            st.session_state.next_signal = next_signal
+            st.session_state.conviction_z = conviction_z
+            st.session_state.conviction_label = conviction_label
+            st.session_state.last_p = last_p
+            st.session_state.df_bt = df_bt
+            st.session_state.pred_bt = pred_bt
+            st.session_state.rf_rate = rf_rate
+            st.session_state.stop_loss = stop_loss
+            st.session_state.z_reentry = z_reentry
+            st.session_state.fee_bps = fee_bps
+            st.session_state.benchmark = benchmark
+            st.session_state.use_wf = use_wf
+            st.session_state.src_label = src_label
+
+    # ── Display results if available ──────────────────────────────────────────
+    if "strat_rets" in st.session_state:
+        strat_rets = st.session_state.strat_rets
+        metrics = st.session_state.metrics
+        audit_trail = st.session_state.audit_trail
+        next_signal = st.session_state.next_signal
+        conviction_z = st.session_state.conviction_z
+        conviction_label = st.session_state.conviction_label
+        last_p = st.session_state.last_p
+        df_bt = st.session_state.df_bt
+        pred_bt = st.session_state.pred_bt
+        rf_rate = st.session_state.rf_rate
+        stop_loss = st.session_state.stop_loss
+        z_reentry = st.session_state.z_reentry
+        fee_bps = st.session_state.fee_bps
+        benchmark = st.session_state.benchmark
+        use_wf = st.session_state.use_wf
+        src_label = st.session_state.src_label
+
+        # Compute true next trading day from today
+        true_next_date = next_trading_day_from_today()
+        pred_last_date = pred_bt.index[-1].date()
+        today_est_date = _today_est()
+        days_stale = (today_est_date - pred_last_date).days
+
+        if days_stale > 1:
+            st.warning(
+                f"⚠️ **Predictions are stale** — last update: **{pred_last_date}** "
+                f"({days_stale} calendar days ago). "
+                "The signal shown is based on the most recent available data.",
+                icon="📅"
+            )
+
+        # ── Hero banner ───────────────────────────────────────────────────────
+        st.divider()
+        regime_name = df_bt["Regime_Name"].iloc[-1] if "Regime_Name" in df_bt.columns else "?"
+        regime_col = regime_colour(regime_name)
+        conv_col = conviction_colour(conviction_label)
+
+        accent_col = ("#16a34a" if conviction_label in ("High", "Very High")
+                      else "#d97706" if conviction_label == "Moderate"
+                      else "#dc2626")
+
+        st.markdown(f"""
+        <div style="background:white; border-left:6px solid {accent_col};
+                    border-radius:12px; padding:18px 24px; margin-bottom:24px;
+                    box-shadow:0 1px 3px rgba(0,0,0,0.1);">
+          <div style="display:flex; justify-content:space-between; align-items:center;">
+            <div>
+              <div style="font-size:12px; color:#6b7280; letter-spacing:1px;">
+                NEXT TRADING DAY SIGNAL — {true_next_date.strftime('%A %b %d, %Y')}
+              </div>
+              <div style="font-size:44px; font-weight:800; color:#1a1a2e; line-height:1.2;">
+                {next_signal}
+              </div>
+              <div style="font-size:14px; color:#6b7280; margin-top:4px;">
+                Conviction: {conviction_label} | Z = {conviction_z:.2f}σ
+              </div>
+            </div>
+            <div style="text-align:right;">
+              <div style="color:#6b7280; font-size:13px; margin-bottom:4px;">CURRENT REGIME</div>
+              <div style="background:{regime_col}18; border:1px solid {regime_col};
+                          border-radius:8px; padding:8px 20px; display:inline-block;">
+                <span style="color:{regime_col}; font-size:20px; font-weight:700;">
+                  {regime_name}
+                </span>
+              </div>
+            </div>
+          </div>
+        </div>
+        """, unsafe_allow_html=True)
+
+        # ── ETF probability bars ───────────────────────────────────────────────
+        st.subheader("P(Beat Cash) — Next 5 Days")
+
+        base_rates = {t: 0.5 for t in TARGET_ETFS}
+        row1_etfs = TARGET_ETFS[:4]
+        row2_etfs = TARGET_ETFS[4:]
+        prob_row1 = st.columns(len(row1_etfs))
+        prob_row2 = st.columns(len(row2_etfs))
+
+        for row_etfs, row_cols in [(row1_etfs, prob_row1), (row2_etfs, prob_row2)]:
+            for col, etf in zip(row_cols, row_etfs):
+                idx = TARGET_ETFS.index(etf)
+                p_val = last_p[idx] if idx < len(last_p) else 0.5
+                base = base_rates.get(etf, 0.5)
+                col.metric(
+                    label=etf,
+                    value=f"{p_val:.1%}",
+                    delta=f"{p_val - base:+.1%} vs baseline",
+                    delta_color="normal" if p_val > base else "inverse"
+                )
+
+        # ── Performance metrics ───────────────────────────────────────────────
+        st.divider()
+        st.subheader("📊 Backtest Performance")
+
+        excess = metrics.get("ann_return", 0) - rf_rate
+        c1, c2, c3, c4 = st.columns(4)
+        c1.metric("📈 Ann. Return", f"{metrics.get('ann_return',0)*100:.2f}%",
+                  delta=f"{excess*100:+.1f}pp vs T-Bill")
+        c2.metric("📊 Sharpe", f"{metrics.get('sharpe',0):.2f}",
+                  delta="Above 1.0 ✓" if metrics.get("sharpe", 0) > 1 else "Below 1.0")
+        c3.metric("🎯 Hit Ratio (Full)", f"{metrics.get('hit_ratio',0)*100:.0f}%",
+                  delta="Strong" if metrics.get("hit_ratio", 0) > 0.6 else "Weak")
+        c4.metric("📉 Max Drawdown", f"{metrics.get('max_dd',0)*100:.2f}%",
+                  delta="Peak to Trough")
+
+        c5, c6, c7, c8 = st.columns(4)
+        dd_idx = metrics.get("max_dd_idx", 0)
+        dd_date = df_bt.index[dd_idx].date() if dd_idx < len(df_bt) else "?"
+        c5.metric("🏆 Calmar", f"{metrics.get('calmar',0):.2f}",
+                  delta=f"MaxDD on {dd_date}")
+        c6.metric("✅ Avg Win", f"{metrics.get('avg_win',0)*100:.2f}%", delta="Daily")
+        c7.metric("❌ Avg Loss", f"{metrics.get('avg_loss',0)*100:.2f}%", delta="Daily")
+        c8.metric("⚖️ Win/Loss", f"{metrics.get('win_loss_r',0):.2f}x", delta="Ratio")
+
+        # ── Equity curve ──────────────────────────────────────────────────────
+        st.divider()
+        st.subheader("📈 Equity Curve")
+        cum_rets = metrics.get("cum_returns", np.array([1]))
+        fig = go.Figure()
+        fig.add_trace(go.Scatter(
+            x=pred_bt.index[-len(cum_rets):],
+            y=cum_rets,
+            mode="lines",
+            name="Strategy",
+            line=dict(color="#0e9f6e", width=2.5),
+            fill="tozeroy",
+            fillcolor="rgba(14,159,110,0.1)",
+        ))
+        fig.add_hline(y=1.0, line_dash="dash", line_color="gray", opacity=0.5)
+        fig.update_layout(
+            template="plotly_white", height=420,
+            margin=dict(l=0, r=0, t=20, b=0),
+            legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
+            xaxis=dict(showgrid=False),
+            yaxis=dict(showgrid=True, gridcolor="#eeeeee", title="Cumulative Return (×)"),
+            hovermode="x unified",
+        )
+        st.plotly_chart(fig, use_container_width=True)
+
+        # ── Regime timeline ──────────────────────────────────────────────────
+        if "Regime_Name" in df_bt.columns:
+            st.divider()
+            st.subheader("🗺️ Market Regime Timeline")
+            regime_df = df_bt[["Regime_Name"]].reindex(pred_bt.index).ffill()
+            fig_r = go.Figure()
+            regime_list = regime_df["Regime_Name"].unique()
+            for rname in regime_list:
+                mask = regime_df["Regime_Name"] == rname
+                fig_r.add_trace(go.Scatter(
+                    x=regime_df.index[mask],
+                    y=[rname] * mask.sum(),
+                    mode="markers",
+                    marker=dict(symbol="square", size=6, color=regime_colour(str(rname))),
+                    name=str(rname),
+                    hovertemplate=f"%{{x|%Y-%m-%d}}<br>{rname}<extra></extra>",
+                ))
+            fig_r.update_layout(
+                template="plotly_white", height=180,
+                margin=dict(l=0, r=0, t=10, b=0),
+                showlegend=True,
+                legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
+                xaxis=dict(showgrid=False),
+                yaxis=dict(showgrid=False),
+            )
+            st.plotly_chart(fig_r, use_container_width=True)
+
+        # ── Audit trail ──────────────────────────────────────────────────────
+        st.divider()
+        st.subheader("📋 Audit Trail — Last 30 Trading Days")
+        if audit_trail:
+            audit_df = pd.DataFrame(audit_trail).tail(30)
+            def style_signal(val):
+                if val == "CASH":
+                    return "color: #888888"
+                colours = {"TLT": "#00bfff", "VNQ": "#ffd700", "SLV": "#c0c0c0",
+                           "GLD": "#ffa500", "LQD": "#88ddff", "HYG": "#ff9966"}
+                return f"color: {colours.get(val, '#ffffff')}; font-weight: 600"
+            def style_regime(val):
+                col = regime_colour(val)
+                return f"color: {col}; font-weight: 500"
+            def style_return(val):
+                if isinstance(val, str) and val.endswith("%"):
+                    try:
+                        v = float(val.replace("%", ""))
+                        return "color: #00b894; font-weight:600" if v > 0 else "color: #d63031; font-weight:600"
+                    except:
+                        pass
+                return ""
+            st.dataframe(
+                audit_df.style
+                .applymap(style_signal, subset=["Signal", "Top_Pick"])
+                .applymap(style_regime, subset=["Regime"])
+                .applymap(style_return, subset=["Signal_Ret%", "TLT_Ret%", "VNQ_Ret%",
+                                                "SLV_Ret%", "GLD_Ret%", "LQD_Ret%", "HYG_Ret%"])
+                .set_properties(**{"text-align": "center"})
+                .hide(axis="index"),
+                use_container_width=True
+            )
+        else:
+            st.info("No audit trail available yet.")
+
+        # ── Momentum weights (optional) ──────────────────────────────────────
+        st.divider()
+        st.subheader("⚖️ Option B — Momentum Score Weights")
+        weights_data = {
+            "Component": [
+                "RoC 5d (×0.40)",
+                "RoC 10d (×0.30)",
+                "RoC 21d (×0.20)",
+                "RoC 63d (×0.10)",
+                "OBV Accumulation 21d (×0.15)",
+                "Breakout vs 20d Range (×0.15)",
+            ],
+            "Weight": [0.40, 0.30, 0.20, 0.10, 0.15, 0.15],
+            "Category": ["Momentum", "Momentum", "Momentum", "Momentum", "Volume", "Breakout"],
+        }
+        wdf = pd.DataFrame(weights_data)
+        fig_i = go.Figure(go.Bar(
+            x=wdf["Weight"],
+            y=wdf["Component"],
+            orientation="h",
+            marker_color=["#00d1b2"]*4 + ["#ffa500"] + ["#ff6b6b"],
+            hovertemplate="%{y}<br>Weight: %{x:.2f}<extra></extra>",
+        ))
+        fig_i.update_layout(
+            template="plotly_white", height=300,
+            margin=dict(l=0, r=0, t=10, b=0),
+            xaxis=dict(title="Weight", showgrid=True, gridcolor="#eeeeee"),
+            yaxis=dict(autorange="reversed", showgrid=False),
+        )
+        st.plotly_chart(fig_i, use_container_width=True)
+
+        # ── Signal history from HF ──────────────────────────────────────────
+        st.divider()
+        st.subheader("📡 Signal History (from Hugging Face)")
+        try:
+            sig_df = cached_load_signals()
+            if sig_df is not None and not sig_df.empty:
+                sig_df = sig_df.tail(30).sort_index(ascending=False)
+                st.dataframe(sig_df, use_container_width=True)
+            else:
+                st.info("No signal history found.")
+        except Exception as e:
+            st.info(f"Could not load signal history: {e}")
+
+    else:
+        st.info("Click **Run Model** in the sidebar to start the backtest.")
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # TAB 2 — Multi‑Year Consensus Sweep (original, unchanged)
 # ═══════════════════════════════════════════════════════════════════════════════
 with tab2:
-    # Paste the entire original consensus tab code here.
-    st.info("(Consensus sweep – paste the original consensus tab code here)")
+    # ── Consensus sweep UI (original) ────────────────────────────────────────
+    st.subheader("Multi‑Year Consensus Sweep")
+    st.caption(
+        "Runs the regime‑aware rotation model across 6 start years and aggregates signals into a weighted consensus.  \n"
+        "Sweep years: 2008, 2013, 2015, 2017, 2019, 2021  ·  Score: 40% Return · 20% Z · 20% Sharpe · 20% (–MaxDD)  \n"
+        "Auto‑runs daily at 8pm EST. Results are date‑stamped — stale cache never shown."
+    )
+
+    # Sweep years and display (identical to original)
+    today_sw = datetime.now(pytz.timezone("US/Eastern")).strftime("%Y%m%d")
+    st.session_state.setdefault("sweep_bust", 0)
+
+    today_cache          = _load_sweep_cache(today_sw, _bust=st.session_state.sweep_bust)
+    all_cache, best_date = _load_sweep_any(_bust=st.session_state.sweep_bust)
+    prev_cache           = {yr: v for yr, v in all_cache.items() if yr not in today_cache}
+    display_cache        = {**prev_cache, **today_cache}
+    display_date         = today_sw if today_cache else best_date
+    sweep_complete       = len(today_cache) == len(SWEEP_YEARS)
+
+    if prev_cache and not sweep_complete:
+        st.warning(
+            f"⚠️ Displaying cached sweep results from **{display_date}**. "
+            "Today's run is still in progress (⏳)."
+        )
+
+    # Visual status per year
+    col_status = st.columns(len(SWEEP_YEARS))
+    for i, yr in enumerate(SWEEP_YEARS):
+        with col_status[i]:
+            if yr in today_cache:
+                st.success(f"{yr} ✅")
+            elif yr in prev_cache:
+                st.info(f"{yr} 📅")
+            else:
+                st.warning(f"{yr} ⏳")
+    st.caption("✅ today · 📅 previous · ⏳ not run")
+    st.divider()
+
+    _missing     = [y for y in SWEEP_YEARS if y not in today_cache]
+    _force_rerun = st.checkbox("🔄 Force re-run all years", value=False,
+                               help="Re-trains even if today's results already exist")
+    _trigger_yrs = SWEEP_YEARS if _force_rerun else _missing
+
+    _cb, _cr, _ci = st.columns([1, 1, 2])
+    with _cb:
+        _sweep_btn = st.button("▶️ Run Missing Years", use_container_width=True,
+                                disabled=len(_trigger_yrs)==0 and not _force_rerun)
+    with _cr:
+        if st.button("🔄 Refresh Cache", use_container_width=True):
+            st.session_state.sweep_bust += 1
+            st.rerun()
+    with _ci:
+        if sweep_complete and not _force_rerun:
+            st.success(f"✅ Today's sweep complete ({today_sw}) — all {len(SWEEP_YEARS)} years ready")
+        else:
+            st.info(f"**{len(today_cache)}/{len(SWEEP_YEARS)}** years done today · "
+                    f"**{len(display_cache)}/{len(SWEEP_YEARS)}** total available.  \n"
+                    f"Will trigger **{len(_trigger_yrs)}** jobs: {', '.join(str(y) for y in _trigger_yrs)}")
+
+    if _sweep_btn and _trigger_yrs:
+        try:
+            if not GH_PAT:
+                raise ValueError("GH_PAT secret not set in Streamlit")
+            _ok = _trigger_sweep(_trigger_yrs, GH_PAT, GITHUB_REPO)
+            if _ok:
+                st.success(f"✅ Triggered {len(_trigger_yrs)} jobs: "
+                           f"{', '.join(str(y) for y in _trigger_yrs)}. ~10-15 mins each.")
+            else:
+                st.error("❌ GitHub API returned non-204. Check GH_PAT permissions.")
+        except Exception as _ex:
+            st.error(f"❌ Trigger failed: {_ex}")
+
+    # Display consensus if any data
+    if display_cache:
+        _cons = _compute_consensus(display_cache)
+        if not _cons:
+            st.warning("Could not compute consensus.")
+        else:
+            _w    = _cons["winner"]
+            _wi   = _cons["etf_summary"][_w]
+            _wc   = ETF_COLORS_SW.get(_w, "#0066cc")
+            _sp   = _wi["score_share"] * 100
+            _sp   = _sp if _sp == _sp else 0.0
+            _slab = "⚠️ Split Signal" if _wi["score_share"] < 0.40 else "✅ Clear Consensus"
+
+            st.markdown(f"""
+            <div style="background:linear-gradient(135deg,#1a1a2e,#16213e);
+                        border-radius:16px; padding:28px 32px; margin:20px 0;">
+              <div style="font-size:12px; letter-spacing:2px; color:#aaa;">WEIGHTED CONSENSUS · REGIME-PREDICTOR · {display_date}</div>
+              <div style="font-size:60px; font-weight:900; color:{_wc}; line-height:1.1;">{_w}</div>
+              <div style="font-size:14px; color:#ccc; margin-top:4px;">{_slab} · Score share {_sp:.0f}% · {_wi['n_years']}/{len(SWEEP_YEARS)} years</div>
+              <div style="display:flex; gap:32px; flex-wrap:wrap; margin-top:20px;">
+                <div><span style="color:#aaa;">Avg Return</span><br><span style="font-size:24px; font-weight:600;">{_wi['avg_return']*100:.1f}%</span></div>
+                <div><span style="color:#aaa;">Avg Z</span><br><span style="font-size:24px; font-weight:600;">{_wi['avg_z']:.2f}σ</span></div>
+                <div><span style="color:#aaa;">Avg Sharpe</span><br><span style="font-size:24px; font-weight:600;">{_wi['avg_sharpe']:.2f}</span></div>
+                <div><span style="color:#aaa;">Avg MaxDD</span><br><span style="font-size:24px; font-weight:600;">{_wi['avg_max_dd']*100:.1f}%</span></div>
+              </div>
+            </div>
+            """, unsafe_allow_html=True)
+
+            # Top ETFs (others)
+            _others = sorted([(e, v) for e, v in _cons["etf_summary"].items() if e != _w],
+                             key=lambda x: -x[1]["cum_score"])
+            if _others:
+                _parts = [f'<span style="color:{ETF_COLORS_SW.get(e,"#888")};font-weight:600;">{e}</span> '
+                          f'<span style="color:#aaa;">({v["cum_score"]:.2f})</span>' for e, v in _others]
+                st.markdown('<div style="text-align:center;font-size:13px;margin-bottom:12px;">Also ranked: '
+                            + ' &nbsp;|&nbsp; '.join(_parts) + '</div>', unsafe_allow_html=True)
+
+            st.divider()
+
+            # Charts
+            import plotly.graph_objects as _go
+            _c1, _c2 = st.columns(2)
+            with _c1:
+                st.markdown("**Weighted Score per ETF**")
+                _es   = _cons["etf_summary"]
+                _setf = sorted(_es.keys(), key=lambda e: -_es[e]["cum_score"])
+                _fb   = _go.Figure(_go.Bar(
+                    x=_setf,
+                    y=[_es[e]["cum_score"] for e in _setf],
+                    marker_color=[ETF_COLORS_SW.get(e,"#888") for e in _setf],
+                    text=[f"{_es[e]['n_years']}yr · {_es[e]['score_share']*100:.0f}%"
+                          for e in _setf],
+                    textposition="outside",
+                ))
+                _fb.update_layout(template="plotly_dark", height=360,
+                                  yaxis_title="Cumulative Score", showlegend=False,
+                                  margin=dict(t=20,b=20))
+                st.plotly_chart(_fb, use_container_width=True)
+
+            with _c2:
+                st.markdown("**Z-Score Conviction by Start Year**")
+                _fs = _go.Figure()
+                for _row in _cons["per_year"]:
+                    _etf = _row["signal"]
+                    _col = ETF_COLORS_SW.get(_etf, "#888")
+                    _fs.add_trace(_go.Scatter(
+                        x=[_row["year"]], y=[_row["z_score"]],
+                        mode="markers+text",
+                        marker=dict(size=18, color=_col, line=dict(color="white",width=1)),
+                        text=[_etf], textposition="top center", showlegend=False,
+                        hovertemplate=(f"<b>{_etf}</b><br>Year: {_row['year']}<br>"
+                                       f"Z: {_row['z_score']:.2f}σ<br>"
+                                       f"Return: {_row['ann_return']*100:.1f}%<extra></extra>"),
+                    ))
+                _fs.add_hline(y=0, line_dash="dot", line_color="rgba(255,255,255,0.3)")
+                _fs.update_layout(template="plotly_dark", height=360,
+                                  xaxis_title="Start Year", yaxis_title="Z-Score (σ)",
+                                  margin=dict(t=20,b=20))
+                st.plotly_chart(_fs, use_container_width=True)
+
+            st.subheader("📋 Full Per-Year Breakdown")
+            _tbl = []
+            for _row in _cons["per_year"]:
+                _tbl.append({
+                    "Start Year":   _row["year"],
+                    "Signal":       _row["signal"],
+                    "Regime":       _row.get("regime", "?"),
+                    "Conviction":   _row.get("conviction", "?"),
+                    "Wtd Score":    round(_row["wtd"], 3),
+                    "Z-Score":      f"{_row['z_score']:.2f}σ",
+                    "Ann. Return":  f"{_row['ann_return']*100:.2f}%",
+                    "Sharpe":       f"{_row['sharpe']:.2f}",
+                    "Max DD":       f"{_row['max_dd']*100:.2f}%",
+                })
+            _tdf = pd.DataFrame(_tbl)
+            def _ss(val):
+                c = ETF_COLORS_SW.get(val, "#888")
+                return f"background-color:{c}22;color:{c};font-weight:700;"
+            def _sr(val):
+                try:
+                    v = float(str(val).replace("%", ""))
+                    return "color:#00b894;font-weight:600" if v > 0 else "color:#d63031;font-weight:600"
+                except Exception:
+                    return ""
+            st.dataframe(_tdf.style.applymap(_ss, subset=["Signal"])
+                                   .applymap(_sr, subset=["Ann. Return"])
+                                   .set_properties(**{"text-align": "center"})
+                                   .hide(axis="index"),
+                         use_container_width=True, height=280)
+    else:
+        st.info("No sweep results yet. Run the sweep above to start.")
 
 # ── Footer (unchanged) ────────────────────────────────────────────────────────
 st.divider()
