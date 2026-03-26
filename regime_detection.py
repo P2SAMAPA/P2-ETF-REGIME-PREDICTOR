@@ -42,17 +42,24 @@ REGIME_NAMES  = {
     5: "Recovery",
 }
 
-# Define TARGET_ETFS locally to avoid import issues
-TARGET_ETFS = ["TLT", "VNQ", "SLV", "GLD", "LQD", "HYG"]
 
 # ── Wasserstein distance utilities ───────────────────────────────────────────
 
 def wasserstein_dist_1d(u: np.ndarray, v: np.ndarray) -> float:
-    return float(wasserstein_distance(u, v))
+    """
+    Compute 1D Wasserstein distance, returning 0.0 if the calculation fails
+    (e.g., due to degenerate distributions that cause division by zero).
+    """
+    try:
+        return float(wasserstein_distance(u, v))
+    except (ZeroDivisionError, ValueError):
+        # If both distributions are identical (or degenerate), distance is 0
+        return 0.0
 
 
 def multi_asset_wasserstein(window_u: np.ndarray,
                              window_v: np.ndarray) -> float:
+    """Average Wasserstein distance across all assets."""
     n_assets = window_u.shape[1]
     total    = 0.0
     for j in range(n_assets):
@@ -74,6 +81,7 @@ def extract_return_windows(df: pd.DataFrame,
 
     for i in range(window, T + 1):
         w = data[i - window:i]
+        # Skip windows with too many NaNs (e.g., >10% missing)
         if np.isnan(w).mean() > 0.1:
             continue
         w = np.nan_to_num(w, nan=0.0)
@@ -132,6 +140,7 @@ class WassersteinKMeans:
         rng = np.random.RandomState(seed)
         N   = len(windows)
 
+        # Initialisation: choose k random windows as centroids
         init_idx  = rng.choice(N, size=self.k, replace=False)
         centroids = windows[init_idx].copy()
 
@@ -149,12 +158,15 @@ class WassersteinKMeans:
             labels  = new_labels
             inertia = new_inertia
 
+            # Update centroids (medoids) for each cluster
             new_centroids = centroids.copy()
             for j in range(self.k):
                 cluster_windows = windows[labels == j]
                 if len(cluster_windows) == 0:
+                    # Empty cluster: pick a random window as new centroid
                     new_centroids[j] = windows[rng.randint(N)]
                 else:
+                    # Compute medoid – if all points are identical, the medoid is that point
                     new_centroids[j] = self._compute_medoid(cluster_windows)
             centroids = new_centroids
 
@@ -199,6 +211,12 @@ class WassersteinKMeans:
                     best_centroids = centroids
             except Exception as e:
                 log.warning(f"  Run {run+1} failed: {e}")
+
+        if best_centroids is None:
+            raise RuntimeError(
+                f"All {self.n_init} runs failed for k={self.k}. "
+                "Check data for zero-variance windows or reduce number of assets."
+            )
 
         self.centroids_ = best_centroids
         self.inertia_   = best_inertia
@@ -427,10 +445,9 @@ class RegimeDetector:
         with negligible impact on regime quality (k=3 always wins,
         inertia difference between best-of-2 vs best-of-5 is <0.5%).
         """
-        # Use local TARGET_ETFS constant instead of importing
         if ret_cols is None:
-            ret_cols = [f"{t}_Ret" for t in TARGET_ETFS
-                        if f"{t}_Ret" in df.columns]
+            # Fallback: use all columns that end with "_Ret"
+            ret_cols = [c for c in df.columns if c.endswith("_Ret")]
 
         self.ret_cols_ = ret_cols
 
