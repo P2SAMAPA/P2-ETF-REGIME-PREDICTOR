@@ -1,27 +1,20 @@
-name: Daily Pipeline P2-ETF-REGIME-PREDICTOR (HF Dataset)
+name: Daily Pipeline — P2-ETF-REGIME-PREDICTOR
 
 on:
   schedule:
-    # Runs at 11:30 UTC (6:30 AM EST) every weekday
-    - cron: '30 11 * * 1-5'
-  workflow_dispatch:
-    inputs:
-      force_refresh:
-        description: 'Force full dataset rebuild'
-        required: false
-        default: 'false'
-      run_wfcv:
-        description: 'Run walk-forward CV after training'
-        required: false
-        default: 'false'
+    # Runs Mon–Fri at 22:30 UTC (6:30 PM ET, after market close + buffer)
+    - cron: '30 22 * * 1-5'
+  workflow_dispatch:  # allow manual trigger anytime
 
 jobs:
-  daily-pipeline:
+
+  pipeline-option-a:
+    name: Option A — FI/Commodities
     runs-on: ubuntu-latest
-    timeout-minutes: 240
+    timeout-minutes: 90
 
     steps:
-      - name: Checkout Code
+      - name: Checkout
         uses: actions/checkout@v4
 
       - name: Set up Python
@@ -29,25 +22,37 @@ jobs:
         with:
           python-version: '3.10'
 
-      - name: Install Dependencies
-        run: |
-          pip install -r requirements.txt
+      - name: Cache pip
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/pip
+          key: ${{ runner.os }}-pip-${{ hashFiles('requirements.txt') }}
+          restore-keys: ${{ runner.os }}-pip-
 
-      - name: Run Daily Pipeline
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Full train + incremental WF + sweep (Option A)
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
           FRED_API_KEY: ${{ secrets.FRED_API_KEY }}
         run: |
-          python train_hf.py             ${{ github.event.inputs.force_refresh == 'true' && '--force-refresh' || '' }}             ${{ github.event.inputs.run_wfcv == 'true' && '--wfcv' || '' }}
+          echo "=== Option A: Full Training ==="
+          python train_hf.py --option a
 
-  walk-forward-cv:
+          echo "=== Option A: Incremental Walk-Forward CV ==="
+          python train_hf.py --option a --wfcv
+
+          echo "=== Option A: Consensus Sweep ==="
+          python train_hf.py --option a --sweep
+
+  pipeline-option-b:
+    name: Option B — Equity ETFs
     runs-on: ubuntu-latest
-    if: github.event.inputs.run_wfcv == 'true' || github.event.schedule == '0 0 1 * *'
-    needs: daily-pipeline
-    timeout-minutes: 180
+    timeout-minutes: 90
 
     steps:
-      - name: Checkout Code
+      - name: Checkout
         uses: actions/checkout@v4
 
       - name: Set up Python
@@ -55,13 +60,26 @@ jobs:
         with:
           python-version: '3.10'
 
-      - name: Install Dependencies
-        run: |
-          pip install -r requirements.txt
+      - name: Cache pip
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/pip
+          key: ${{ runner.os }}-pip-${{ hashFiles('requirements.txt') }}
+          restore-keys: ${{ runner.os }}-pip-
 
-      - name: Run Walk-Forward CV
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Full train + incremental WF + sweep (Option B)
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
           FRED_API_KEY: ${{ secrets.FRED_API_KEY }}
         run: |
-          python train_hf.py --wfcv-only
+          echo "=== Option B: Full Training ==="
+          python train_hf.py --option b
+
+          echo "=== Option B: Incremental Walk-Forward CV ==="
+          python train_hf.py --option b --wfcv
+
+          echo "=== Option B: Consensus Sweep ==="
+          python train_hf.py --option b --sweep
