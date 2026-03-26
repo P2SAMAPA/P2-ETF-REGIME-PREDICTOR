@@ -21,6 +21,7 @@ import logging
 import numpy as np
 import pandas as pd
 from datetime import datetime, timezone, timedelta
+from typing import Optional   # <-- moved import to top
 
 import config as cfg
 from data_manager_hf import (
@@ -363,9 +364,6 @@ def main():
         traceback.print_exc()
         sys.exit(1)
 
-
-# Fix missing Optional import
-from typing import Optional
 
 if __name__ == "__main__":
     main()
