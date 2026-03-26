@@ -20,7 +20,7 @@ jobs:
   retrain-option-a:
     name: Retrain Option A — FI/Commodities
     runs-on: ubuntu-latest
-    timeout-minutes: 300
+    timeout-minutes: 360
     # Skip Option A job if manual trigger specifies option=b
     if: ${{ github.event.inputs.option != 'b' }}
 
@@ -65,7 +65,7 @@ jobs:
   retrain-option-b:
     name: Retrain Option B — Equity ETFs
     runs-on: ubuntu-latest
-    timeout-minutes: 240
+    timeout-minutes: 360
     # Skip Option B job if manual trigger specifies option=a
     if: ${{ github.event.inputs.option != 'a' }}
 
