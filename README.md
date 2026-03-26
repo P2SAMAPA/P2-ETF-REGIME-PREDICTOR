@@ -1,115 +1,67 @@
 # P2-ETF-REGIME-PREDICTOR
 
-A regime-aware ETF momentum rotation model combining Wasserstein distance-based market clustering with a composite momentum ranking score to generate daily trading signals across 6 fixed income and commodity ETFs.
+A regime-aware ETF rotation model combining Wasserstein distance-based market clustering with composite momentum ranking to generate daily trading signals.
+
+Two independent options:
+- **Option A** — FI / Commodities ETFs: TLT · VNQ · SLV · GLD · LQD · HYG
+- **Option B** — Equity ETFs: SPY · QQQ · XLK · XLF · XLE · XLV · XLI · XLY · XLP · XLU · GDX · XME
 
 ---
 
 ## Overview
 
-Most quantitative models treat all market environments the same. This model explicitly detects the current market regime before ranking ETFs — a regime of rising rates calls for different momentum signals than a crisis or risk-on environment.
-
 The model answers one practical question each trading day: **which ETF is most likely to beat the risk-free rate over the next 5 trading days?**
+
+It does this in two layers:
+
+**Layer 1 — Wasserstein k-means Regime Detection**
+Each rolling 20-day window of ETF returns is treated as an empirical probability distribution. Wasserstein distance (Earth Mover's Distance) measures how far apart two distributions are, capturing their full shape rather than just mean and variance. The optimal number of regimes k is auto-selected using Maximum Mean Discrepancy (MMD) scoring. Based on Horvath, Issa & Muguruza (2021/2024).
+
+**Layer 2 — Momentum Ranking**
+A composite momentum score ranks all ETFs each day using Rate-of-Change (5d/10d/21d/63d), OBV accumulation (21d), and Breakout score (20d range position). Scores are Z-normalised cross-sectionally. The top-ranked ETF with Z ≥ 0.7σ enters; otherwise the strategy holds CASH earning the 3M T-Bill rate.
 
 ---
 
-## Methodology
-
-### Layer 1 — Wasserstein k-means Regime Detection
-
-Based on *"Clustering Market Regimes Using the Wasserstein Distance"* (Horvath, Issa, Muguruza, 2021 — [SSRN 3947905](https://papers.ssrn.com/sol3/papers.cfm?abstract_id=3947905)), published in the Journal of Computational Finance (2024).
-
-Each rolling 20-day window of ETF returns is treated as an empirical probability distribution. The **Wasserstein distance** (Earth Mover's Distance) measures how far apart two such distributions are, accounting for their full shape rather than just mean and variance. This is mathematically more rigorous than standard k-means on moments and outperforms Hidden Markov Models on non-Gaussian financial returns.
-
-The optimal number of regimes k is auto-selected using Maximum Mean Discrepancy (MMD) scoring. Typical regimes detected:
-
-| Regime | Characteristics |
-|--------|----------------|
-| Risk-On | Low VIX, positive returns, normal yield curve |
-| Risk-Off | Elevated VIX, negative returns, widening spreads |
-| Rate-Rising | Inverted/flattening yield curve, rising DGS10 |
-| Crisis | Very high VIX, extreme HY spread widening |
-
-### Layer 2 — Momentum Ranking
-
-A pure rules-based composite momentum score ranks all 6 ETFs each day. The top-ranked ETF with sufficient conviction enters; below threshold the strategy holds CASH earning the 3M T-Bill rate.
-
-**Composite score weights:**
-- 40% × Rate-of-Change 5d
-- 30% × Rate-of-Change 10d
-- 20% × Rate-of-Change 21d
-- 10% × Rate-of-Change 63d
-- 15% × OBV accumulation (21d volume-weighted momentum)
-- 15% × 20d Breakout score (position within rolling high/low range)
-
-Scores are Z-normalised cross-sectionally across all 6 ETFs each day. The top-ranked ETF with Z ≥ threshold enters; otherwise CASH.
-
-### Strategy Execution
+## Strategy Rules
 
 | Rule | Detail |
-|------|--------|
-| Conviction gate | Z-score ≥ 0.7σ to enter — below this earns 3M T-Bill |
+|---|---|
+| Conviction gate | Z ≥ 0.7σ to enter; below threshold earns T-Bill |
 | Stop-loss | 2-day cumulative loss ≤ −12% → CASH until Z ≥ 1.0σ |
 | Transaction cost | 5bps per one-way trade |
 
-### Walk-Forward Validation
-
-Performance is validated using rolling 3-year training / 1-year test windows across the full history (2011–2026), producing 3,812 genuinely out-of-sample days. The model never sees test-period data during training for any fold. Walk-forward OOS predictions refresh monthly.
-
 ---
 
-## ETF Universe
+## Validation
 
-| ETF | Description | Regime Affinity |
-|-----|-------------|-----------------|
-| TLT | iShares 20+ Year Treasury Bond | Risk-Off, Rate-Falling |
-| VNQ | Vanguard Real Estate ETF | Risk-On, low inflation |
-| SLV | iShares Silver Trust | Crisis, high inflation |
-| GLD | SPDR Gold Shares | Crisis, Stagflation |
-| LQD | iShares Investment Grade Corporate Bond | Risk-On, stable rates |
-| HYG | iShares High Yield Corporate Bond | Risk-On, credit expansion |
-
-Benchmarks: SPY (S&P 500) · AGG (US Aggregate Bond)
+Walk-forward validated using expanding 3-year training / 1-year test windows (2011–present). The model never sees test-period data during any training fold. Walk-forward OOS predictions are updated incrementally each day — only new/missing folds are computed, keeping daily runs fast.
 
 ---
 
 ## Infrastructure
 
 ```
-GitHub (this repo)               — code + GitHub Actions workflows
-GitLab (p2-etf-regime-predictor) — dataset, models, signals storage
-GitHub Actions                   — daily 6:30am EST training pipeline
-Streamlit Community Cloud        — read-only UI
+GitHub            — code + Actions workflows
+Hugging Face      — dataset, models, predictions, signals (namespaced by option)
+Streamlit Cloud   — read-only UI
 ```
 
-### Daily Pipeline (GitHub Actions)
+### HF Dataset Structure
 
 ```
-Weekday 6:30am EST:
-1. Load dataset from GitLab
-2. Fetch yesterday's new data (yfinance + FRED)
-3. Wasserstein k-means regime detection
-4. Fit MomentumRanker on full history
-5. Generate in-sample prediction history
-6. Produce next-day signal
-7. Push dataset, model, predictions, signal to GitLab
-
-1st of each month (automatic):
-8. Run walk-forward OOS validation (3y train / 1y test, rolling)
-9. Save fresh OOS predictions to GitLab
-```
-
-### GitLab Storage Structure
-
-```
-data/
-  etf_data.csv              — full feature dataset, daily updated
-  mom_pred_history.csv      — in-sample momentum predictions
-  wf_mom_pred_history.csv   — walk-forward OOS predictions (monthly refresh)
-models/
-  regime_detector.pkl       — fitted WassersteinKMeans model
-  momentum_ranker.pkl       — fitted MomentumRanker
-signals/
-  signals.csv               — daily signal log
+P2SAMAPA/p2-etf-regime-predictor
+├── option_a/
+│   ├── etf_data.parquet               — Option A feature dataset
+│   ├── mom_pred_history.parquet       — Option A in-sample predictions
+│   ├── wf_mom_pred_history.parquet    — Option A walk-forward OOS predictions
+│   ├── signals.parquet                — Option A daily signal log
+│   ├── models/
+│   │   ├── regime_detector.pkl
+│   │   └── momentum_ranker.pkl
+│   ├── meta/feature_list.json
+│   └── sweep/sweep_{year}_{date}.json
+└── option_b/
+    └── (same structure as option_a)
 ```
 
 ---
@@ -118,18 +70,35 @@ signals/
 
 ```
 P2-ETF-REGIME-PREDICTOR/
-├── app.py                  # Streamlit UI (read-only, loads from GitLab)
-├── train.py                # Pipeline orchestrator (called by Actions)
-├── data_manager.py         # FRED + yfinance fetching, feature engineering
-├── models.py               # MomentumRanker + walk-forward CV
-├── strategy.py             # Signal execution, backtesting, metrics
+├── app.py                    # Streamlit UI
+├── train_hf.py               # Training pipeline (--option a/b)
+├── daily_data_update.py      # Incremental data update (both options)
+├── data_manager_hf.py        # Data fetching, features, HF I/O
+├── config.py                 # Central config (ETF universes, paths, params)
+├── regime_detection.py       # Wasserstein k-means regime detector
+├── models.py                 # MomentumRanker
+├── strategy.py               # Signal execution, backtesting, metrics
+├── utils.py                  # Shared utilities
 ├── requirements.txt
-├── README.md
-└── .github/
-    └── workflows/
-        ├── daily_pipeline.yml    # Weekday 6:30am EST + monthly WF refresh
-        └── manual_retrain.yml    # On-demand full rebuild or WF run
+└── .github/workflows/
+    ├── seed_hf_dataset.yml   # One-time full seed (manual only)
+    ├── daily_data_update.yml # Incremental data update (Mon–Fri after close)
+    ├── daily_pipeline.yml    # Full train + WF + sweep, Options A & B in parallel
+    └── manual_retrain.yml    # Full retrain, Options A & B in parallel (daily + on-demand)
 ```
+
+---
+
+## Workflows
+
+| Workflow | Schedule | Purpose |
+|---|---|---|
+| `seed_hf_dataset.yml` | Manual only | One-time full dataset seed from scratch |
+| `daily_data_update.yml` | Mon–Fri 21:30 UTC | Incremental OHLCV + macro data update |
+| `daily_pipeline.yml` | Mon–Fri 22:30 UTC | Full train + incremental WF CV + sweep (A & B parallel) |
+| `manual_retrain.yml` | Mon–Fri 03:00 UTC + on-demand | Full retrain all folds (A & B parallel) |
+
+Options A and B run as parallel jobs within the same workflow, making efficient use of GitHub Actions free-tier concurrency.
 
 ---
 
@@ -137,44 +106,75 @@ P2-ETF-REGIME-PREDICTOR/
 
 ### Required Secrets
 
-**GitHub Secrets** (Settings → Secrets and variables → Actions):
+**GitHub Secrets** (Settings → Secrets → Actions):
 
 | Secret | Value |
-|--------|-------|
-| `GITLAB_API_TOKEN` | GitLab Personal Access Token |
-| `GITLAB_REPO_URL` | `https://gitlab.com/P2SAMAPA/p2-etf-regime-predictor` |
-| `FRED_API_KEY` | FRED API key from fred.stlouisfed.org |
+|---|---|
+| `HF_TOKEN` | Hugging Face write token |
+| `FRED_API_KEY` | FRED API key (fred.stlouisfed.org) |
 
-**Streamlit Community Cloud Secrets** (App Settings → Secrets):
+**Streamlit Community Cloud Secrets**:
 
 ```toml
-GITLAB_API_TOKEN = "your_token"
-GITLAB_REPO_URL  = "https://gitlab.com/P2SAMAPA/p2-etf-regime-predictor"
-FRED_API_KEY     = "your_fred_key"
+HF_TOKEN        = "your_hf_token"
+HF_DATASET_REPO = "P2SAMAPA/p2-etf-regime-predictor"
+FRED_API_KEY    = "your_fred_key"
+GITHUB_REPO     = "P2SAMAPA/P2-ETF-REGIME-PREDICTOR"
+GH_PAT          = "your_github_pat"
 ```
 
 ### First Run
 
 1. Push all files to GitHub
-2. Go to Actions → **Manual Retrain** → Run workflow (`force_refresh=true`, `run_wfcv=true`)
-3. Wait ~35 min for retrain, then ~3 hours for walk-forward job to complete
-4. Verify GitLab populates with `etf_data.csv`, `momentum_ranker.pkl`, `mom_pred_history.csv`, `wf_mom_pred_history.csv`, `signals.csv`
-5. Connect repo to Streamlit Community Cloud and deploy
+2. Actions → **Seed HF Dataset** → Run workflow (seeds both options)
+3. Actions → **Manual Retrain** → Run workflow (trains both options, all folds)
+4. Verify HF dataset populates under `option_a/` and `option_b/`
+5. Deploy to Streamlit Community Cloud
 
 ### Local Testing
 
 ```bash
 pip install -r requirements.txt
-# Create .env with your secrets (never commit this file)
-python train.py --local --force-refresh   # skips GitLab write
-python train.py --wfcv-only               # run WF only (writes to GitLab)
+
+# Set environment variables
+export HF_TOKEN=...
+export FRED_API_KEY=...
+
+# Full train Option A
+python train_hf.py --option a
+
+# Full train Option B  
+python train_hf.py --option b
+
+# Walk-forward CV (incremental)
+python train_hf.py --option a --wfcv
+
+# Consensus sweep
+python train_hf.py --option a --sweep
+
+# Incremental data update (both options)
+python daily_data_update.py
+```
+
+---
+
+## train_hf.py Usage
+
+```
+python train_hf.py --option a                    # Full train Option A
+python train_hf.py --option b                    # Full train Option B
+python train_hf.py --option a --force-refresh    # Force data rebuild
+python train_hf.py --option a --wfcv             # Incremental walk-forward CV
+python train_hf.py --option a --sweep            # Consensus sweep (all years)
+python train_hf.py --option a --sweep-year 2015  # Sweep for one year only
+python train_hf.py --option a --single-year 2015 # Single-year WF test
 ```
 
 ---
 
 ## Disclaimer
 
-This project is for research and educational purposes only. It is not investment advice. Past backtest performance does not guarantee future results. Always consult a qualified financial advisor before making investment decisions.
+This project is for research and educational purposes only. It is not investment advice. Past backtest performance does not guarantee future results.
 
 ---
 
