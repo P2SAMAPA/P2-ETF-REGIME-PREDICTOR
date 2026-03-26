@@ -20,7 +20,7 @@ jobs:
   retrain-option-a:
     name: Retrain Option A — FI/Commodities
     runs-on: ubuntu-latest
-    timeout-minutes: 240
+    timeout-minutes: 300
     # Skip Option A job if manual trigger specifies option=b
     if: ${{ github.event.inputs.option != 'b' }}
 
