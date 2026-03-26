@@ -1,32 +1,31 @@
-name: Manual Retrain P2-ETF-REGIME-PREDICTOR
+name: Manual Retrain — P2-ETF-REGIME-PREDICTOR
 
 on:
+  schedule:
+    # Runs daily at 03:00 UTC (11 PM ET) — after daily pipeline completes
+    - cron: '0 3 * * 1-5'
   workflow_dispatch:
     inputs:
       force_refresh:
-        description: 'Force full dataset rebuild from scratch'
-        required: false
-        default: 'true'
-      run_wfcv:
-        description: 'Run walk-forward CV (takes ~3 hours)'
+        description: 'Force full dataset rebuild from source APIs'
         required: false
         default: 'false'
-      sweep_mode:
-        description: 'Run in sweep mode (for multi-year consensus)'
+      option:
+        description: 'Which option to retrain: a, b, or both'
         required: false
-        default: 'false'
-      start_year:
-        description: 'Start year for sweep mode (e.g., 2008, 2013, 2015)'
-        required: false
-        default: ''
+        default: 'both'
 
 jobs:
-  retrain:
+
+  retrain-option-a:
+    name: Retrain Option A — FI/Commodities
     runs-on: ubuntu-latest
     timeout-minutes: 240
+    # Skip Option A job if manual trigger specifies option=b
+    if: ${{ github.event.inputs.option != 'b' }}
 
     steps:
-      - name: Checkout Code
+      - name: Checkout
         uses: actions/checkout@v4
 
       - name: Set up Python
@@ -34,26 +33,76 @@ jobs:
         with:
           python-version: '3.10'
 
-      - name: Install Dependencies
-        run: |
-          pip install -r requirements.txt
+      - name: Cache pip
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/pip
+          key: ${{ runner.os }}-pip-${{ hashFiles('requirements.txt') }}
+          restore-keys: ${{ runner.os }}-pip-
 
-      - name: Run Retrain
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Full retrain Option A
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
           FRED_API_KEY: ${{ secrets.FRED_API_KEY }}
         run: |
-          ARGS=""
+          FORCE=""
           if [ "${{ github.event.inputs.force_refresh }}" == "true" ]; then
-            ARGS="$ARGS --force-refresh"
+            FORCE="--force-refresh"
           fi
-          if [ "${{ github.event.inputs.run_wfcv }}" == "true" ]; then
-            ARGS="$ARGS --wfcv"
+
+          echo "=== Option A: Full Training ==="
+          python train_hf.py --option a $FORCE
+
+          echo "=== Option A: Full Walk-Forward CV (all folds) ==="
+          python train_hf.py --option a --wfcv $FORCE
+
+          echo "=== Option A: Consensus Sweep ==="
+          python train_hf.py --option a --sweep $FORCE
+
+  retrain-option-b:
+    name: Retrain Option B — Equity ETFs
+    runs-on: ubuntu-latest
+    timeout-minutes: 240
+    # Skip Option B job if manual trigger specifies option=a
+    if: ${{ github.event.inputs.option != 'a' }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+
+      - name: Cache pip
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/pip
+          key: ${{ runner.os }}-pip-${{ hashFiles('requirements.txt') }}
+          restore-keys: ${{ runner.os }}-pip-
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Full retrain Option B
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+          FRED_API_KEY: ${{ secrets.FRED_API_KEY }}
+        run: |
+          FORCE=""
+          if [ "${{ github.event.inputs.force_refresh }}" == "true" ]; then
+            FORCE="--force-refresh"
           fi
-          if [ "${{ github.event.inputs.sweep_mode }}" == "true" ]; then
-            ARGS="$ARGS --sweep-mode"
-          fi
-          if [ -n "${{ github.event.inputs.start_year }}" ]; then
-            ARGS="$ARGS --start-year ${{ github.event.inputs.start_year }}"
-          fi
-          python train_hf.py $ARGS
+
+          echo "=== Option B: Full Training ==="
+          python train_hf.py --option b $FORCE
+
+          echo "=== Option B: Full Walk-Forward CV (all folds) ==="
+          python train_hf.py --option b --wfcv $FORCE
+
+          echo "=== Option B: Consensus Sweep ==="
+          python train_hf.py --option b --sweep $FORCE
