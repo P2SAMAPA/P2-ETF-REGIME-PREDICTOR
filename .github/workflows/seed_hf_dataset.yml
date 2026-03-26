@@ -39,7 +39,7 @@ jobs:
 
           sys.path.insert(0, '.')
           from data_manager_hf import (
-              build_full_dataset, save_dataset_to_hf,
+              build_full_dataset, save_dataset,   # <-- use save_dataset, not legacy alias
               HF_REPO_ID, TARGET_ETFS, ALL_TICKERS
           )
 
@@ -60,7 +60,7 @@ jobs:
               log.info(f"   Date range: {df.index[0].date()} to {df.index[-1].date()}")
 
               log.info("Step 2/4: Uploading dataset to Hugging Face...")
-              ok = save_dataset_to_hf(df, option=opt)
+              ok = save_dataset(df, option=opt)   # <-- corrected call
               if not ok:
                   log.error(f"❌ Failed to save dataset for Option {opt.upper()}")
                   sys.exit(1)
