@@ -15,8 +15,9 @@ Usage:
 Performance notes
 ─────────────────
   Full training:   ~25–30 min per option (full k-selection + 5 inits)
-  WF CV:           ~4–5 min per fold × 14 folds = ~60–70 min per option
-                   (incremental: only missing folds computed)
+  WF CV:           ~4–8 min per fold × 14 folds = ~60–90 min per option
+                   fixed_k loaded from saved HF detector — no re-fitting
+                   incremental: only missing folds computed
   Sweep:           ~5–8 min per sweep year
 """
 
@@ -37,6 +38,7 @@ from data_manager_hf import (
     load_predictions, save_predictions,
     load_wf_predictions, save_wf_predictions,
     load_signals, save_signals,
+    load_detector as hf_load_detector,
     save_detector, save_ranker,
     save_feature_list, save_sweep_result,
 )
@@ -57,6 +59,28 @@ def _target_etfs(option: str) -> list:
 
 def _label(option: str) -> str:
     return f"Option {option.upper()}"
+
+
+def _load_fixed_k(option: str) -> Optional[int]:
+    """
+    Load the saved detector from HF and return its optimal_k_.
+    Used by WF CV to avoid re-running k-selection.
+    Falls back to None if detector not found (first run).
+    """
+    try:
+        detector_bytes = hf_load_detector(option)
+        if detector_bytes is None:
+            log.warning(f"{_label(option)}: no saved detector found on HF — "
+                        f"will run k-selection")
+            return None
+        detector = pickle.loads(detector_bytes)
+        k = detector.optimal_k_
+        log.info(f"{_label(option)}: loaded fixed_k={k} from saved HF detector")
+        return k
+    except Exception as e:
+        log.warning(f"{_label(option)}: could not load detector from HF ({e}) — "
+                    f"will run k-selection")
+        return None
 
 
 # ── Core training steps ───────────────────────────────────────────────────────
@@ -127,6 +151,7 @@ def run_full_training(option: str, force_refresh: bool = False,
     """
     Full train for a single option. Uploads all artefacts to HF.
     Always uses full pipeline parameters — no shortcuts.
+    Saves detector to HF so WF CV can load fixed_k without re-fitting.
     Returns (detector, ranker, predictions).
     """
     log.info(f"{'='*60}")
@@ -170,13 +195,14 @@ def run_walk_forward_cv(option: str,
     """
     Incremental walk-forward CV using the WF fast path.
 
-    Optimisation: each fold uses wf_mode=True with fixed_k from the
-    full-data detector, skipping k-selection and using reduced
-    n_init/max_windows/max_iter. This cuts per-fold time from ~25 min
-    to ~4 min with negligible impact on OOS validation quality.
+    fixed_k is loaded from the already-saved HF detector — no re-fitting
+    of k-selection needed. This saves ~20 min at the start of the WF job.
+
+    If no saved detector exists (e.g. first run), falls back to a quick
+    full-data fit to determine k.
 
     Only computes missing/new folds — existing folds are preserved.
-    Live signal is unaffected — it always uses the full pipeline fit.
+    Live signal is unaffected — always uses the full pipeline fit.
     """
     log.info(f"{_label(option)}: incremental walk-forward CV (fast path)...")
 
@@ -191,19 +217,20 @@ def run_walk_forward_cv(option: str,
         log.info(f"{_label(option)}: WF folds already computed: "
                  f"{sorted(completed_years)}")
 
-    # ── Determine fixed_k from a full-data detector fit ───────────────────────
-    # Run k-selection once on the full dataset; reuse across all WF folds.
-    # This is the same k the live signal uses — no additional compute overhead
-    # since run_full_training already did this fit and saved the detector.
-    # Here we re-run it only if needed (e.g. --wfcv called standalone).
-    log.info(f"{_label(option)}: determining fixed_k from full-data fit...")
-    ret_cols     = [f"{t}_Ret" for t in _target_etfs(option)
-                    if f"{t}_Ret" in df.columns]
-    ref_detector = RegimeDetector(window=20, k=None)
-    ref_detector.fit(df[ret_cols], sweep_mode=False, wf_mode=False)
-    fixed_k = ref_detector.optimal_k_
-    log.info(f"{_label(option)}: fixed_k={fixed_k} — "
-             f"will be used for all WF folds")
+    # ── Get fixed_k from saved HF detector (no re-fitting) ───────────────────
+    fixed_k = _load_fixed_k(option)
+
+    if fixed_k is None:
+        # Fallback: detector not saved yet — run k-selection once on full data
+        log.info(f"{_label(option)}: no saved detector — running k-selection "
+                 f"once on full data to determine fixed_k...")
+        ret_cols     = [f"{t}_Ret" for t in _target_etfs(option)
+                        if f"{t}_Ret" in df.columns]
+        ref_detector = RegimeDetector(window=20, k=None)
+        ref_detector.fit(df[ret_cols], sweep_mode=False, wf_mode=False)
+        fixed_k = ref_detector.optimal_k_
+
+    log.info(f"{_label(option)}: using fixed_k={fixed_k} for all WF folds")
 
     # ── Run missing folds ─────────────────────────────────────────────────────
     new_folds = []
@@ -233,7 +260,7 @@ def run_walk_forward_cv(option: str,
                  f"test {test_df.index[0].date()}→"
                  f"{test_df.index[-1].date()}")
 
-        # Fast path: wf_mode=True, fixed_k from full-data fit
+        # Fast path: wf_mode=True, fixed_k from saved HF detector
         detector   = train_regime_detector(train_df, option,
                                            wf_mode=True, fixed_k=fixed_k)
         ranker     = train_momentum_ranker(train_df, detector, option)
@@ -288,12 +315,14 @@ def run_single_year(year: int, option: str,
         log.error(f"{_label(option)}: insufficient data for year {year}")
         return None
 
-    # Get fixed_k from full-data fit
-    ret_cols     = [f"{t}_Ret" for t in _target_etfs(option)
-                    if f"{t}_Ret" in df.columns]
-    ref_detector = RegimeDetector(window=20, k=None)
-    ref_detector.fit(df[ret_cols], wf_mode=False)
-    fixed_k = ref_detector.optimal_k_
+    # Load fixed_k from saved HF detector
+    fixed_k = _load_fixed_k(option)
+    if fixed_k is None:
+        ret_cols     = [f"{t}_Ret" for t in _target_etfs(option)
+                        if f"{t}_Ret" in df.columns]
+        ref_detector = RegimeDetector(window=20, k=None)
+        ref_detector.fit(df[ret_cols], wf_mode=False)
+        fixed_k = ref_detector.optimal_k_
 
     detector   = train_regime_detector(train_df, option,
                                        wf_mode=True, fixed_k=fixed_k)
