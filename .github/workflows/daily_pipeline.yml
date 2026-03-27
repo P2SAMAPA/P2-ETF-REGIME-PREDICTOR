@@ -3,9 +3,10 @@ name: Daily Pipeline — P2-ETF-REGIME-PREDICTOR
 # Estimated runtimes (free tier):
 #   full-train-a:  ~30 min  (full k-selection + 5 inits, live signal)
 #   full-train-b:  ~35 min  (larger universe)
-#   wf-sweep-a:    ~80 min  (14 folds × ~4 min + 7 sweep years × ~7 min)
-#   wf-sweep-b:    ~90 min  (larger universe)
-# All 4 jobs run in parallel — wall clock time ~90 min, well within 6h limit.
+#   wf-sweep-a:    ~80 min  (14 folds × ~4 min fast path, no k re-selection)
+#   wf-sweep-b:    ~100 min (larger universe)
+# All 4 jobs run in parallel — wall clock ~100 min, well within 6h limit.
+# fixed_k loaded from saved HF detector — no redundant k-selection in WF jobs.
 
 on:
   schedule:
@@ -63,11 +64,11 @@ jobs:
           FRED_API_KEY: ${{ secrets.FRED_API_KEY }}
         run: python train_hf.py --option b
 
-  # ── Job 3: WF CV + sweep Option A (OOS validation + consensus) ─────────────
+  # ── Job 3: WF CV + sweep Option A ──────────────────────────────────────────
   wf-sweep-a:
     name: WF + Sweep — Option A (FI/Commodities)
     runs-on: ubuntu-latest
-    timeout-minutes: 180
+    timeout-minutes: 240
 
     steps:
       - uses: actions/checkout@v4
@@ -92,11 +93,11 @@ jobs:
           FRED_API_KEY: ${{ secrets.FRED_API_KEY }}
         run: python train_hf.py --option a --sweep
 
-  # ── Job 4: WF CV + sweep Option B (OOS validation + consensus) ─────────────
+  # ── Job 4: WF CV + sweep Option B ──────────────────────────────────────────
   wf-sweep-b:
     name: WF + Sweep — Option B (Equity ETFs)
     runs-on: ubuntu-latest
-    timeout-minutes: 180
+    timeout-minutes: 240
 
     steps:
       - uses: actions/checkout@v4
