@@ -1,8 +1,13 @@
 name: Manual Retrain — P2-ETF-REGIME-PREDICTOR
 
+# Same 4-job parallel structure as daily_pipeline.yml.
+# Runs daily at 03:00 UTC and on-demand via workflow_dispatch.
+# --force-refresh rebuilds dataset from source APIs (use when data is corrupted
+# or a full history rebuild is needed).
+
 on:
   schedule:
-    # Runs daily at 03:00 UTC (11 PM ET) — after daily pipeline completes
+    # Mon–Fri at 03:00 UTC (11 PM ET) — after daily pipeline completes
     - cron: '0 3 * * 1-5'
   workflow_dispatch:
     inputs:
@@ -17,32 +22,25 @@ on:
 
 jobs:
 
-  retrain-option-a:
-    name: Retrain Option A — FI/Commodities
+  # ── Job 1: Full retrain Option A ─────────────────────────────────────────────
+  retrain-full-a:
+    name: Full Retrain — Option A (FI/Commodities)
     runs-on: ubuntu-latest
-    timeout-minutes: 360
-    # Skip Option A job if manual trigger specifies option=b
+    timeout-minutes: 90
     if: ${{ github.event.inputs.option != 'b' }}
 
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Set up Python
-        uses: actions/setup-python@v5
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
         with:
           python-version: '3.10'
-
-      - name: Cache pip
-        uses: actions/cache@v4
+      - uses: actions/cache@v4
         with:
           path: ~/.cache/pip
           key: ${{ runner.os }}-pip-${{ hashFiles('requirements.txt') }}
           restore-keys: ${{ runner.os }}-pip-
-
       - name: Install dependencies
         run: pip install -r requirements.txt
-
       - name: Full retrain Option A
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
@@ -52,42 +50,27 @@ jobs:
           if [ "${{ github.event.inputs.force_refresh }}" == "true" ]; then
             FORCE="--force-refresh"
           fi
-
-          echo "=== Option A: Full Training ==="
           python train_hf.py --option a $FORCE
 
-          echo "=== Option A: Full Walk-Forward CV (all folds) ==="
-          python train_hf.py --option a --wfcv $FORCE
-
-          echo "=== Option A: Consensus Sweep ==="
-          python train_hf.py --option a --sweep $FORCE
-
-  retrain-option-b:
-    name: Retrain Option B — Equity ETFs
+  # ── Job 2: Full retrain Option B ─────────────────────────────────────────────
+  retrain-full-b:
+    name: Full Retrain — Option B (Equity ETFs)
     runs-on: ubuntu-latest
-    timeout-minutes: 360
-    # Skip Option B job if manual trigger specifies option=a
+    timeout-minutes: 90
     if: ${{ github.event.inputs.option != 'a' }}
 
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Set up Python
-        uses: actions/setup-python@v5
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
         with:
           python-version: '3.10'
-
-      - name: Cache pip
-        uses: actions/cache@v4
+      - uses: actions/cache@v4
         with:
           path: ~/.cache/pip
           key: ${{ runner.os }}-pip-${{ hashFiles('requirements.txt') }}
           restore-keys: ${{ runner.os }}-pip-
-
       - name: Install dependencies
         run: pip install -r requirements.txt
-
       - name: Full retrain Option B
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
@@ -97,12 +80,84 @@ jobs:
           if [ "${{ github.event.inputs.force_refresh }}" == "true" ]; then
             FORCE="--force-refresh"
           fi
-
-          echo "=== Option B: Full Training ==="
           python train_hf.py --option b $FORCE
 
-          echo "=== Option B: Full Walk-Forward CV (all folds) ==="
-          python train_hf.py --option b --wfcv $FORCE
+  # ── Job 3: WF CV + sweep Option A ────────────────────────────────────────────
+  retrain-wf-sweep-a:
+    name: WF + Sweep — Option A (FI/Commodities)
+    runs-on: ubuntu-latest
+    timeout-minutes: 240
+    if: ${{ github.event.inputs.option != 'b' }}
 
-          echo "=== Option B: Consensus Sweep ==="
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+      - uses: actions/cache@v4
+        with:
+          path: ~/.cache/pip
+          key: ${{ runner.os }}-pip-${{ hashFiles('requirements.txt') }}
+          restore-keys: ${{ runner.os }}-pip-
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+      - name: WF CV Option A (all folds, incremental)
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+          FRED_API_KEY: ${{ secrets.FRED_API_KEY }}
+        run: |
+          FORCE=""
+          if [ "${{ github.event.inputs.force_refresh }}" == "true" ]; then
+            FORCE="--force-refresh"
+          fi
+          python train_hf.py --option a --wfcv $FORCE
+      - name: Consensus sweep Option A
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+          FRED_API_KEY: ${{ secrets.FRED_API_KEY }}
+        run: |
+          FORCE=""
+          if [ "${{ github.event.inputs.force_refresh }}" == "true" ]; then
+            FORCE="--force-refresh"
+          fi
+          python train_hf.py --option a --sweep $FORCE
+
+  # ── Job 4: WF CV + sweep Option B ────────────────────────────────────────────
+  retrain-wf-sweep-b:
+    name: WF + Sweep — Option B (Equity ETFs)
+    runs-on: ubuntu-latest
+    timeout-minutes: 240
+    if: ${{ github.event.inputs.option != 'a' }}
+
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+      - uses: actions/cache@v4
+        with:
+          path: ~/.cache/pip
+          key: ${{ runner.os }}-pip-${{ hashFiles('requirements.txt') }}
+          restore-keys: ${{ runner.os }}-pip-
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+      - name: WF CV Option B (all folds, incremental)
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+          FRED_API_KEY: ${{ secrets.FRED_API_KEY }}
+        run: |
+          FORCE=""
+          if [ "${{ github.event.inputs.force_refresh }}" == "true" ]; then
+            FORCE="--force-refresh"
+          fi
+          python train_hf.py --option b --wfcv $FORCE
+      - name: Consensus sweep Option B
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+          FRED_API_KEY: ${{ secrets.FRED_API_KEY }}
+        run: |
+          FORCE=""
+          if [ "${{ github.event.inputs.force_refresh }}" == "true" ]; then
+            FORCE="--force-refresh"
+          fi
           python train_hf.py --option b --sweep $FORCE
