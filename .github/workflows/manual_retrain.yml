@@ -2,8 +2,9 @@ name: Manual Retrain — P2-ETF-REGIME-PREDICTOR
 
 # Same 4-job parallel structure as daily_pipeline.yml.
 # Runs daily at 03:00 UTC and on-demand via workflow_dispatch.
-# --force-refresh rebuilds dataset from source APIs (use when data is corrupted
-# or a full history rebuild is needed).
+# WF+Sweep jobs get 300 min timeout (vs 240 in daily) since manual retrain
+# may need to rebuild all 14 folds from scratch on first run.
+# fixed_k loaded from saved HF detector — no redundant k-selection in WF jobs.
 
 on:
   schedule:
@@ -86,7 +87,7 @@ jobs:
   retrain-wf-sweep-a:
     name: WF + Sweep — Option A (FI/Commodities)
     runs-on: ubuntu-latest
-    timeout-minutes: 240
+    timeout-minutes: 300
     if: ${{ github.event.inputs.option != 'b' }}
 
     steps:
@@ -101,7 +102,7 @@ jobs:
           restore-keys: ${{ runner.os }}-pip-
       - name: Install dependencies
         run: pip install -r requirements.txt
-      - name: WF CV Option A (all folds, incremental)
+      - name: WF CV Option A (incremental, fast path)
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
           FRED_API_KEY: ${{ secrets.FRED_API_KEY }}
@@ -126,7 +127,7 @@ jobs:
   retrain-wf-sweep-b:
     name: WF + Sweep — Option B (Equity ETFs)
     runs-on: ubuntu-latest
-    timeout-minutes: 240
+    timeout-minutes: 300
     if: ${{ github.event.inputs.option != 'a' }}
 
     steps:
@@ -141,7 +142,7 @@ jobs:
           restore-keys: ${{ runner.os }}-pip-
       - name: Install dependencies
         run: pip install -r requirements.txt
-      - name: WF CV Option B (all folds, incremental)
+      - name: WF CV Option B (incremental, fast path)
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
           FRED_API_KEY: ${{ secrets.FRED_API_KEY }}
