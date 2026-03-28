@@ -270,6 +270,10 @@ def calculate_metrics(strat_rets: np.ndarray,
     """Full performance metrics from daily return array."""
     if len(strat_rets) == 0:
         return {}
+    # Drop NaN returns (warmup rows) before any calculation
+    strat_rets = strat_rets[~np.isnan(strat_rets)]
+    if len(strat_rets) == 0:
+        return {}
     cum      = np.cumprod(1 + strat_rets)
     n        = len(strat_rets)
     ann_ret  = float(cum[-1] ** (252 / n) - 1)
