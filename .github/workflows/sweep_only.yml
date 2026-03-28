@@ -1,0 +1,57 @@
+name: Sweep Only — P2-ETF-REGIME-PREDICTOR
+
+# Runs just the consensus sweep for both options in parallel.
+# Use this when sweep JSON files need to be regenerated without
+# re-running full training or walk-forward CV.
+# Typical runtime: ~10 min per option (7 sweep years × ~1 min each).
+
+on:
+  workflow_dispatch:
+
+jobs:
+
+  sweep-a:
+    name: Consensus Sweep — Option A (FI/Commodities)
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+      - uses: actions/cache@v4
+        with:
+          path: ~/.cache/pip
+          key: ${{ runner.os }}-pip-${{ hashFiles('requirements.txt') }}
+          restore-keys: ${{ runner.os }}-pip-
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+      - name: Consensus sweep Option A
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+          FRED_API_KEY: ${{ secrets.FRED_API_KEY }}
+        run: python train_hf.py --option a --sweep
+
+  sweep-b:
+    name: Consensus Sweep — Option B (Equity ETFs)
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+      - uses: actions/cache@v4
+        with:
+          path: ~/.cache/pip
+          key: ${{ runner.os }}-pip-${{ hashFiles('requirements.txt') }}
+          restore-keys: ${{ runner.os }}-pip-
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+      - name: Consensus sweep Option B
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+          FRED_API_KEY: ${{ secrets.FRED_API_KEY }}
+        run: python train_hf.py --option b --sweep
