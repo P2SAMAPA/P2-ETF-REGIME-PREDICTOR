@@ -7,8 +7,11 @@ Structure:
   Option A — FI / Commodities ETFs  → Single Year | Consensus
   Option B — Equity ETFs            → Single Year | Consensus
 
-All Streamlit widgets have unique keys namespaced by option to prevent
-StreamlitDuplicateElementId errors when both tabs render simultaneously.
+Single Year tab:
+  - Historical years (2011–2025): walk-forward OOS predictions
+  - 2026 YTD: in-sample predictions from mom_pred_history.parquet
+
+All Streamlit widgets have unique keys namespaced by option.
 """
 
 import os
@@ -103,6 +106,12 @@ def _load_wf_preds(option: str) -> pd.DataFrame:
 
 
 @st.cache_data(ttl=0)
+def _load_insample_preds(option: str) -> pd.DataFrame:
+    df = load_predictions(option)
+    return df if df is not None else pd.DataFrame()
+
+
+@st.cache_data(ttl=0)
 def _load_dataset(option: str, start_year: int) -> pd.DataFrame:
     return get_data(option=option, start_year=start_year, force_refresh=False)
 
@@ -162,7 +171,7 @@ def run_strategy(pred_df: pd.DataFrame, df: pd.DataFrame,
     }
 
 
-# ── Display components (all keyed by option) ──────────────────────────────────
+# ── Display components ────────────────────────────────────────────────────────
 
 def show_hero_banner(next_signal, conviction_label, conviction_z,
                      regime_name, next_date, label=""):
@@ -227,8 +236,8 @@ def show_metrics(metrics: dict, rf_rate: float, option: str):
     c4.metric("Hit Ratio",    f"{metrics.get('hit_ratio', 0)*100:.0f}%")
 
 
-def show_equity_curve(cum_rets: np.ndarray, dates: pd.Index, option: str,
-                      suffix: str = ""):
+def show_equity_curve(cum_rets: np.ndarray, dates: pd.Index,
+                      option: str, suffix: str = ""):
     st.subheader("📈 Equity Curve")
     fig = go.Figure()
     fig.add_trace(go.Scatter(
@@ -278,8 +287,8 @@ def show_regime_timeline(df_bt: pd.DataFrame, pred_bt: pd.DataFrame,
                     key=f"regime_timeline_{option}_{suffix}")
 
 
-def show_audit_trail(audit_trail: list, target_etfs: list, option: str,
-                     suffix: str = ""):
+def show_audit_trail(audit_trail: list, target_etfs: list,
+                     option: str, suffix: str = ""):
     st.subheader("📋 Audit Trail — Last 30 Trading Days")
     if not audit_trail:
         st.info("No audit trail available.")
@@ -304,8 +313,7 @@ def show_audit_trail(audit_trail: list, target_etfs: list, option: str,
                 pass
         return ""
 
-    signal_cols = [c for c in ["Signal", "Top_Pick"]
-                   if c in audit_df.columns]
+    signal_cols = [c for c in ["Signal", "Top_Pick"] if c in audit_df.columns]
     ret_cols    = [c for c in audit_df.columns if c.endswith("_Ret%")]
     regime_cols = ["Regime"] if "Regime" in audit_df.columns else []
 
@@ -334,35 +342,63 @@ def _check_staleness(pred_bt: pd.DataFrame):
         )
 
 
+def _render_results(result: dict, target_etfs: list, option: str,
+                    suffix: str, banner_label: str):
+    """Shared display logic for both WF and YTD results."""
+    _check_staleness(result["pred_bt"])
+    regime_name = (result["regime_series"].iloc[-1]
+                   if not result["regime_series"].empty else "?")
+    next_date = _next_trading_day(result["pred_bt"].index[-1])
+
+    show_hero_banner(
+        result["next_signal"], result["conviction_label"],
+        result["conviction_z"], regime_name, next_date,
+        label=banner_label,
+    )
+    show_prob_bars(result["last_p"], target_etfs, option)
+    st.divider()
+    show_metrics(result["metrics"], result["rf_rate"], option)
+    st.divider()
+    show_equity_curve(
+        result["metrics"].get("cum_returns", np.array([1])),
+        result["pred_bt"].index,
+        option=option, suffix=suffix,
+    )
+    st.divider()
+    show_regime_timeline(result["df_bt"], result["pred_bt"],
+                         option=option, suffix=suffix)
+    st.divider()
+    show_audit_trail(result["audit_trail"], target_etfs,
+                     option=option, suffix=suffix)
+
+
 # ── Single-Year sub-tab ───────────────────────────────────────────────────────
 
 def render_single_year_tab(option: str, target_etfs: list, params: dict):
-    st.caption(
-        "Select a test year to view the walk-forward OOS backtest. "
-        "Data always fetched fresh from Hugging Face."
-    )
+    """
+    Single Year tab:
+      - 2011–2025: walk-forward OOS predictions (genuine out-of-sample)
+      - 2026 YTD:  in-sample predictions from mom_pred_history.parquet
+                   sliced to Jan 2026 onwards (live monitoring view)
+    """
+    current_year = datetime.now().year  # 2026
+    ytd_label    = f"{current_year} YTD (Live)"
 
     available_years = [int(w["test_year"]) for w in cfg.WINDOWS]
-    selected_year   = st.selectbox(
-        "Test year",
-        options=[str(y) for y in available_years],
-        index=len(available_years) - 1,
-        key=f"year_select_{option}",        # unique key per option
+    year_options    = [str(y) for y in available_years] + [ytd_label]
+
+    st.caption(
+        "Historical years (2011–2025) show genuine walk-forward out-of-sample results — "
+        f"the model was trained on data before the test year only. "
+        f"**{ytd_label}** shows live in-sample predictions from {current_year} onwards."
     )
-    year = int(selected_year)
 
-    with st.spinner("Loading walk-forward predictions from Hugging Face..."):
-        wf_preds = _load_wf_preds(option)
-
-    if wf_preds.empty:
-        st.warning("No walk-forward predictions found. "
-                   "Run the daily pipeline or manual retrain first.")
-        return
-
-    wf_year = wf_preds.loc[f"{year}-01-01":f"{year}-12-31"]
-    if wf_year.empty:
-        st.warning(f"No walk-forward predictions found for {year}.")
-        return
+    selected = st.selectbox(
+        "Select year",
+        options=year_options,
+        index=len(year_options) - 1,   # default to YTD
+        key=f"year_select_{option}",
+    )
 
     with st.spinner("Loading dataset from Hugging Face..."):
         df = _load_dataset(option, cfg.START_YEAR_DEFAULT)
@@ -378,43 +414,69 @@ def render_single_year_tab(option: str, target_etfs: list, params: dict):
         except Exception:
             pass
 
+    # ── 2026 YTD — use in-sample predictions ──────────────────────────────────
+    if selected == ytd_label:
+        with st.spinner("Loading in-sample predictions from Hugging Face..."):
+            insample = _load_insample_preds(option)
+
+        if insample.empty:
+            st.warning("No in-sample predictions found. Run the daily pipeline first.")
+            return
+
+        ytd_preds = insample.loc[f"{current_year}-01-01":]
+        if ytd_preds.empty:
+            st.warning(f"No predictions found for {current_year} yet.")
+            return
+
+        st.info(
+            f"**{ytd_label}** — {len(ytd_preds)} trading days "
+            f"({ytd_preds.index[0].date()} → {ytd_preds.index[-1].date()}). "
+            "These are **in-sample** predictions — the model has seen this data.",
+            icon="ℹ️",
+        )
+
+        result = run_strategy(ytd_preds, df, target_etfs, params)
+        if not result:
+            return
+
+        st.success(f"{ytd_label} — {len(ytd_preds)} trading days")
+        st.divider()
+        _render_results(result, target_etfs, option,
+                        suffix=f"ytd_{current_year}",
+                        banner_label=f"Latest Signal — {result['pred_bt'].index[-1].strftime('%b %d, %Y')}")
+        return
+
+    # ── Historical year — use walk-forward OOS predictions ────────────────────
+    year = int(selected)
+
+    with st.spinner("Loading walk-forward predictions from Hugging Face..."):
+        wf_preds = _load_wf_preds(option)
+
+    if wf_preds.empty:
+        st.warning("No walk-forward predictions found. "
+                   "Run the daily pipeline or manual retrain first.")
+        return
+
+    wf_year = wf_preds.loc[f"{year}-01-01":f"{year}-12-31"]
+    if wf_year.empty:
+        st.warning(f"No walk-forward predictions found for {year}. "
+                   "This fold may not have been computed yet.")
+        return
+
+    st.success(
+        f"Walk-forward OOS — {year} — {len(wf_year)} trading days "
+        f"({wf_year.index[0].date()} → {wf_year.index[-1].date()}). "
+        "Model trained on data before this year only."
+    )
+    st.divider()
+
     result = run_strategy(wf_year, df, target_etfs, params)
     if not result:
         return
 
-    st.success(f"Walk-forward OOS — {year} — {len(wf_year)} trading days")
-    st.divider()
-
-    _check_staleness(result["pred_bt"])
-
-    regime_name = (result["regime_series"].iloc[-1]
-                   if not result["regime_series"].empty else "?")
-    next_date   = _next_trading_day(result["pred_bt"].index[-1])
-
-    show_hero_banner(
-        result["next_signal"], result["conviction_label"],
-        result["conviction_z"], regime_name, next_date,
-        label=f"Year-End {year}",
-    )
-    show_prob_bars(result["last_p"], target_etfs, option)
-    st.divider()
-    show_metrics(result["metrics"], result["rf_rate"], option)
-    st.divider()
-    show_equity_curve(
-        result["metrics"].get("cum_returns", np.array([1])),
-        result["pred_bt"].index,
-        option=option, suffix=f"sy_{year}",
-    )
-    st.divider()
-    show_regime_timeline(
-        result["df_bt"], result["pred_bt"],
-        option=option, suffix=f"sy_{year}",
-    )
-    st.divider()
-    show_audit_trail(
-        result["audit_trail"], target_etfs,
-        option=option, suffix=f"sy_{year}",
-    )
+    _render_results(result, target_etfs, option,
+                    suffix=f"sy_{year}",
+                    banner_label=f"Year-End {year}")
 
 
 # ── Consensus sub-tab ─────────────────────────────────────────────────────────
@@ -422,10 +484,11 @@ def render_single_year_tab(option: str, target_etfs: list, params: dict):
 def _compute_consensus(sweep_data: dict) -> dict:
     if not sweep_data:
         return {}
+
     def _safe(v, default=0.0):
         try:
             f = float(v)
-            return default if (f != f) else f  # f != f catches NaN
+            return default if (f != f) else f
         except (TypeError, ValueError):
             return default
 
@@ -513,10 +576,10 @@ def render_consensus_tab(option: str, target_etfs: list):
         st.warning("Could not compute consensus.")
         return
 
-    winner = cons["winner"]
-    wi     = cons["etf_summary"][winner]
-    wc     = _etf_colour(winner)
-    sp     = wi["score_share"] * 100
+    winner    = cons["winner"]
+    wi        = cons["etf_summary"][winner]
+    wc        = _etf_colour(winner)
+    sp        = wi["score_share"] * 100
     sig_label = ("⚠️ Split Signal" if wi["score_share"] < 0.40
                  else "✅ Clear Consensus")
 
