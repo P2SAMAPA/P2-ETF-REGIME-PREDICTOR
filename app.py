@@ -7,8 +7,8 @@ Structure:
   Option A — FI / Commodities ETFs  → Single Year | Consensus
   Option B — Equity ETFs            → Single Year | Consensus
 
-target_etfs passed explicitly to all strategy and display calls.
-No hardcoded ETF lists anywhere in this file.
+All Streamlit widgets have unique keys namespaced by option to prevent
+StreamlitDuplicateElementId errors when both tabs render simultaneously.
 """
 
 import os
@@ -85,22 +85,13 @@ def _etf_colour(etf: str) -> str:
     return cfg.ETF_COLORS.get(etf, "#888888")
 
 
-# ── Cached loaders (ttl=0: always fresh, never stale) ────────────────────────
+# ── Cached loaders (ttl=0: always fresh) ─────────────────────────────────────
 
 @st.cache_resource(ttl=0)
 def _load_detector(option: str):
     try:
         b = load_detector(option)
         return RegimeDetector.from_bytes(b) if b else None
-    except Exception:
-        return None
-
-
-@st.cache_resource(ttl=0)
-def _load_ranker(option: str):
-    try:
-        b = load_ranker(option)
-        return MomentumRanker.from_bytes(b) if b else None
     except Exception:
         return None
 
@@ -125,7 +116,6 @@ def _load_sweep(option: str) -> tuple:
 
 def run_strategy(pred_df: pd.DataFrame, df: pd.DataFrame,
                  target_etfs: list, params: dict) -> dict:
-    """Execute strategy and return results dict."""
     common = pred_df.index.intersection(df.index)
     if len(common) < 5:
         return {}
@@ -150,7 +140,7 @@ def run_strategy(pred_df: pd.DataFrame, df: pd.DataFrame,
             stop_loss_pct=params["stop_loss"],
             fee_bps=params["fee_bps"],
             regime_series=regime_series,
-            target_etfs=target_etfs,       # ← correct universe
+            target_etfs=target_etfs,
         )
         metrics = calculate_metrics(strat_rets, rf_rate=rf_rate)
     except Exception as e:
@@ -172,7 +162,7 @@ def run_strategy(pred_df: pd.DataFrame, df: pd.DataFrame,
     }
 
 
-# ── Display components ────────────────────────────────────────────────────────
+# ── Display components (all keyed by option) ──────────────────────────────────
 
 def show_hero_banner(next_signal, conviction_label, conviction_z,
                      regime_name, next_date, label=""):
@@ -212,7 +202,7 @@ def show_hero_banner(next_signal, conviction_label, conviction_z,
     """, unsafe_allow_html=True)
 
 
-def show_prob_bars(last_p: list, target_etfs: list):
+def show_prob_bars(last_p: list, target_etfs: list, option: str):
     st.subheader("P(Beat Cash) — Next 5 Days")
     n    = len(target_etfs)
     cols = st.columns(min(n, 6))
@@ -226,7 +216,7 @@ def show_prob_bars(last_p: list, target_etfs: list):
         )
 
 
-def show_metrics(metrics: dict, rf_rate: float):
+def show_metrics(metrics: dict, rf_rate: float, option: str):
     st.subheader("📊 Performance Metrics")
     excess = metrics.get("ann_return", 0) - rf_rate
     c1, c2, c3, c4 = st.columns(4)
@@ -237,7 +227,8 @@ def show_metrics(metrics: dict, rf_rate: float):
     c4.metric("Hit Ratio",    f"{metrics.get('hit_ratio', 0)*100:.0f}%")
 
 
-def show_equity_curve(cum_rets: np.ndarray, dates: pd.Index):
+def show_equity_curve(cum_rets: np.ndarray, dates: pd.Index, option: str,
+                      suffix: str = ""):
     st.subheader("📈 Equity Curve")
     fig = go.Figure()
     fig.add_trace(go.Scatter(
@@ -255,10 +246,12 @@ def show_equity_curve(cum_rets: np.ndarray, dates: pd.Index):
                    gridcolor="#eee"),
         hovermode="x unified",
     )
-    st.plotly_chart(fig, use_container_width=True)
+    st.plotly_chart(fig, use_container_width=True,
+                    key=f"equity_curve_{option}_{suffix}")
 
 
-def show_regime_timeline(df_bt: pd.DataFrame, pred_bt: pd.DataFrame):
+def show_regime_timeline(df_bt: pd.DataFrame, pred_bt: pd.DataFrame,
+                         option: str, suffix: str = ""):
     if "Regime_Name" not in df_bt.columns:
         return
     st.subheader("🗺️ Regime Timeline")
@@ -281,10 +274,12 @@ def show_regime_timeline(df_bt: pd.DataFrame, pred_bt: pd.DataFrame):
                     xanchor="right", x=1),
         xaxis=dict(showgrid=False), yaxis=dict(showgrid=False),
     )
-    st.plotly_chart(fig, use_container_width=True)
+    st.plotly_chart(fig, use_container_width=True,
+                    key=f"regime_timeline_{option}_{suffix}")
 
 
-def show_audit_trail(audit_trail: list, target_etfs: list):
+def show_audit_trail(audit_trail: list, target_etfs: list, option: str,
+                     suffix: str = ""):
     st.subheader("📋 Audit Trail — Last 30 Trading Days")
     if not audit_trail:
         st.info("No audit trail available.")
@@ -324,7 +319,8 @@ def show_audit_trail(audit_trail: list, target_etfs: list):
     if ret_cols:
         styled = styled.applymap(_style_ret, subset=ret_cols)
 
-    st.dataframe(styled, use_container_width=True)
+    st.dataframe(styled, use_container_width=True,
+                 key=f"audit_trail_{option}_{suffix}")
 
 
 def _check_staleness(pred_bt: pd.DataFrame):
@@ -351,7 +347,7 @@ def render_single_year_tab(option: str, target_etfs: list, params: dict):
         "Test year",
         options=[str(y) for y in available_years],
         index=len(available_years) - 1,
-        key=f"year_select_{option}",
+        key=f"year_select_{option}",        # unique key per option
     )
     year = int(selected_year)
 
@@ -400,18 +396,25 @@ def render_single_year_tab(option: str, target_etfs: list, params: dict):
         result["conviction_z"], regime_name, next_date,
         label=f"Year-End {year}",
     )
-    show_prob_bars(result["last_p"], target_etfs)
+    show_prob_bars(result["last_p"], target_etfs, option)
     st.divider()
-    show_metrics(result["metrics"], result["rf_rate"])
+    show_metrics(result["metrics"], result["rf_rate"], option)
     st.divider()
     show_equity_curve(
         result["metrics"].get("cum_returns", np.array([1])),
         result["pred_bt"].index,
+        option=option, suffix=f"sy_{year}",
     )
     st.divider()
-    show_regime_timeline(result["df_bt"], result["pred_bt"])
+    show_regime_timeline(
+        result["df_bt"], result["pred_bt"],
+        option=option, suffix=f"sy_{year}",
+    )
     st.divider()
-    show_audit_trail(result["audit_trail"], target_etfs)
+    show_audit_trail(
+        result["audit_trail"], target_etfs,
+        option=option, suffix=f"sy_{year}",
+    )
 
 
 # ── Consensus sub-tab ─────────────────────────────────────────────────────────
@@ -507,7 +510,8 @@ def render_consensus_tab(option: str, target_etfs: list):
     wi     = cons["etf_summary"][winner]
     wc     = _etf_colour(winner)
     sp     = wi["score_share"] * 100
-    sig_label = "⚠️ Split Signal" if wi["score_share"] < 0.40 else "✅ Clear Consensus"
+    sig_label = ("⚠️ Split Signal" if wi["score_share"] < 0.40
+                 else "✅ Clear Consensus")
 
     st.markdown(f"""
     <div style="background:linear-gradient(135deg,#1a1a2e,#16213e);
@@ -542,12 +546,16 @@ def render_consensus_tab(option: str, target_etfs: list):
                      if e != winner],
                     key=lambda x: -x[1]["cum_score"])
     if others:
-        parts = [f'<span style="color:{_etf_colour(e)};font-weight:600;">{e}</span> '
-                 f'<span style="color:#aaa;">({v["cum_score"]:.2f})</span>'
-                 for e, v in others]
-        st.markdown('<div style="text-align:center;font-size:13px;margin-bottom:12px;">'
-                    'Also ranked: ' + ' &nbsp;|&nbsp; '.join(parts) + '</div>',
-                    unsafe_allow_html=True)
+        parts = [
+            f'<span style="color:{_etf_colour(e)};font-weight:600;">{e}</span> '
+            f'<span style="color:#aaa;">({v["cum_score"]:.2f})</span>'
+            for e, v in others
+        ]
+        st.markdown(
+            '<div style="text-align:center;font-size:13px;margin-bottom:12px;">'
+            'Also ranked: ' + ' &nbsp;|&nbsp; '.join(parts) + '</div>',
+            unsafe_allow_html=True,
+        )
 
     st.divider()
 
@@ -570,7 +578,8 @@ def render_consensus_tab(option: str, target_etfs: list):
             yaxis_title="Cumulative Score", showlegend=False,
             margin=dict(t=20, b=20),
         )
-        st.plotly_chart(fig_b, use_container_width=True)
+        st.plotly_chart(fig_b, use_container_width=True,
+                        key=f"consensus_bar_{option}")
 
     with c2:
         st.markdown("**Z-Score Conviction by Start Year**")
@@ -596,7 +605,8 @@ def render_consensus_tab(option: str, target_etfs: list):
             xaxis_title="Start Year", yaxis_title="Z-Score (σ)",
             margin=dict(t=20, b=20),
         )
-        st.plotly_chart(fig_s, use_container_width=True)
+        st.plotly_chart(fig_s, use_container_width=True,
+                        key=f"consensus_scatter_{option}")
 
     st.subheader("📋 Per-Year Breakdown")
     tbl = []
@@ -632,7 +642,8 @@ def render_consensus_tab(option: str, target_etfs: list):
         .applymap(_sr, subset=["Ann. Return"])
         .set_properties(**{"text-align": "center"})
         .hide(axis="index"),
-        use_container_width=True, height=300,
+        use_container_width=True,
+        key=f"consensus_table_{option}",
     )
 
 
@@ -645,11 +656,14 @@ with st.sidebar:
     st.divider()
     st.subheader("⚙️ Strategy Parameters")
     stop_loss = st.slider("Stop Loss (%)", -30, -5,
-                          int(cfg.STOP_LOSS_PCT * 100), step=1) / 100.0
+                          int(cfg.STOP_LOSS_PCT * 100), step=1,
+                          key="sidebar_stop_loss") / 100.0
     z_reentry = st.slider("Z Re-entry Threshold", 0.5, 2.0,
-                          cfg.Z_REENTRY, step=0.1)
+                          cfg.Z_REENTRY, step=0.1,
+                          key="sidebar_z_reentry")
     fee_bps   = st.slider("Transaction Cost (bps)", 0, 20,
-                          cfg.TRANSACTION_BPS)
+                          cfg.TRANSACTION_BPS,
+                          key="sidebar_fee_bps")
     st.divider()
     st.caption("Parameters apply to both options. "
                "Data always fetched fresh from HF.")
