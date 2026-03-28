@@ -343,36 +343,56 @@ def run_sweep(option: str, years: Optional[list] = None,
                  f"({len(train_df)} training days)...")
 
         detector = train_regime_detector(train_df, option, sweep_mode=True)
-        # Add regime labels before predictions so strategy gets correct regimes
-        train_r  = detector.add_regime_to_df(train_df)
-        ranker   = MomentumRanker(target_etfs=etfs)
+
+        # Add regime labels to train_df — detector was fitted on train_df[ret_cols]
+        # so its dates_ index aligns with train_df.index after the warmup window.
+        # We must use the full train_df (not just ret_cols) for add_regime_to_df.
+        train_r = detector.add_regime_to_df(train_df)
+
+        # Debug: confirm regime labels were applied
+        n_regime = train_r["Regime_Name"].notna().sum() if "Regime_Name" in train_r.columns else 0
+        n_unknown = (train_r["Regime_Name"] == "Unknown").sum() if "Regime_Name" in train_r.columns else len(train_r)
+        log.info(f"{_label(option)}: sweep {year} — regime labels: "
+                 f"{n_regime} rows labelled, {n_unknown} Unknown")
+
+        ranker = MomentumRanker(target_etfs=etfs)
         ranker.fit(train_r)
         predictions = generate_predictions(train_r, ranker, option)
 
-        # Build ret_df with only the ETF return columns for this option
-        ret_cols = [f"{t}_Ret" for t in etfs if f"{t}_Ret" in train_r.columns]
-        ret_df   = train_r[ret_cols]
+        # Build ret_df aligned to predictions index
+        ret_cols  = [f"{t}_Ret" for t in etfs if f"{t}_Ret" in train_r.columns]
+        common    = predictions.index.intersection(train_r.index)
+        ret_df    = train_r.loc[common, ret_cols]
+        pred_aligned = predictions.loc[common]
+
+        log.info(f"{_label(option)}: sweep {year} — "
+                 f"predictions={len(predictions)}, ret_df={len(ret_df)}, "
+                 f"common={len(common)}")
 
         rf_rate = (float(train_r["DTB3"].iloc[-1] / 100)
                    if "DTB3" in train_r.columns else cfg.RISK_FREE_RATE)
 
-        regime_series = train_r.get("Regime_Name",
-                                    pd.Series("Unknown", index=train_r.index))
+        regime_series = (train_r["Regime_Name"].reindex(common)
+                         if "Regime_Name" in train_r.columns
+                         else pd.Series("Unknown", index=common))
 
         try:
             (strat_rets, _, _, next_signal, conviction_z,
              conviction_label, last_p) = execute_strategy(
-                predictions_df=predictions,
+                predictions_df=pred_aligned,
                 daily_ret_df=ret_df,
                 rf_rate=rf_rate,
                 z_reentry=cfg.Z_REENTRY,
                 stop_loss_pct=cfg.STOP_LOSS_PCT,
                 fee_bps=cfg.TRANSACTION_BPS,
                 regime_series=regime_series,
-                target_etfs=etfs,          # ← pass correct universe
+                target_etfs=etfs,
             )
+            log.info(f"{_label(option)}: sweep {year} — "
+                     f"strat_rets len={len(strat_rets)}, "
+                     f"mean={float(np.nanmean(strat_rets)):.4f}, "
+                     f"nan_count={int(np.isnan(strat_rets).sum())}")
             metrics = calculate_metrics(strat_rets, rf_rate=rf_rate)
-            # Use time-series Z (sweep_z) not cross-sectional Z
             sweep_z, sweep_label = compute_sweep_z(strat_rets, rf_rate=rf_rate)
         except Exception as e:
             log.warning(f"{_label(option)}: strategy failed for "
@@ -383,8 +403,8 @@ def run_sweep(option: str, years: Optional[list] = None,
             sweep_z      = 0.0
             sweep_label  = "Low"
 
-        regime_name = (train_df["Regime_Name"].iloc[-1]
-                       if "Regime_Name" in train_df.columns else "Unknown")
+        regime_name = (train_r["Regime_Name"].iloc[-1]
+                       if "Regime_Name" in train_r.columns else "Unknown")
 
         result = {
             "signal":     next_signal,
