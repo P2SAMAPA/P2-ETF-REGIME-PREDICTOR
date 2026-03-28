@@ -392,8 +392,10 @@ def run_sweep(option: str, years: Optional[list] = None,
                      f"strat_rets len={len(strat_rets)}, "
                      f"mean={float(np.nanmean(strat_rets)):.4f}, "
                      f"nan_count={int(np.isnan(strat_rets).sum())}")
-            metrics = calculate_metrics(strat_rets, rf_rate=rf_rate)
-            sweep_z, sweep_label = compute_sweep_z(strat_rets, rf_rate=rf_rate)
+            # Drop any NaN returns (e.g. from first-row warmup) before metrics
+            strat_rets_clean = strat_rets[~np.isnan(strat_rets)]
+            metrics = calculate_metrics(strat_rets_clean, rf_rate=rf_rate)
+            sweep_z, sweep_label = compute_sweep_z(strat_rets_clean, rf_rate=rf_rate)
         except Exception as e:
             log.warning(f"{_label(option)}: strategy failed for "
                         f"sweep year {year}: {e}")
