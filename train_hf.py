@@ -342,20 +342,22 @@ def run_sweep(option: str, years: Optional[list] = None,
         log.info(f"{_label(option)}: sweep year {year} "
                  f"({len(train_df)} training days)...")
 
-        detector    = train_regime_detector(train_df, option, sweep_mode=True)
-        ranker      = train_momentum_ranker(train_df, detector, option)
-        predictions = generate_predictions(train_df, ranker, option)
+        detector = train_regime_detector(train_df, option, sweep_mode=True)
+        # Add regime labels before predictions so strategy gets correct regimes
+        train_r  = detector.add_regime_to_df(train_df)
+        ranker   = MomentumRanker(target_etfs=etfs)
+        ranker.fit(train_r)
+        predictions = generate_predictions(train_r, ranker, option)
 
-        # Build ret_df with only the ETF columns for this option
-        ret_cols = [f"{t}_Ret" for t in etfs if f"{t}_Ret" in train_df.columns]
-        ret_df   = train_df[ret_cols]
+        # Build ret_df with only the ETF return columns for this option
+        ret_cols = [f"{t}_Ret" for t in etfs if f"{t}_Ret" in train_r.columns]
+        ret_df   = train_r[ret_cols]
 
-        rf_rate = (float(train_df["DTB3"].iloc[-1] / 100)
-                   if "DTB3" in train_df.columns else cfg.RISK_FREE_RATE)
+        rf_rate = (float(train_r["DTB3"].iloc[-1] / 100)
+                   if "DTB3" in train_r.columns else cfg.RISK_FREE_RATE)
 
-        regime_series = (train_df["Regime_Name"]
-                         if "Regime_Name" in train_df.columns
-                         else pd.Series("Unknown", index=train_df.index))
+        regime_series = train_r.get("Regime_Name",
+                                    pd.Series("Unknown", index=train_r.index))
 
         try:
             (strat_rets, _, _, next_signal, conviction_z,
