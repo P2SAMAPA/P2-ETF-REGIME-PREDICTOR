@@ -594,7 +594,15 @@ def load_feature_list(option: str) -> Optional[list]:
 def save_sweep_result(results: dict, start_year: int, option: str) -> bool:
     today_est = (datetime.utcnow() - timedelta(hours=5)).strftime("%Y%m%d")
     path      = f"{_paths(option)['sweep_prefix']}{start_year}_{today_est}.json"
-    return hf_write_file(path, json.dumps(results, indent=2, default=str),
+
+    # Sanitise: replace NaN/Inf with None so output is valid JSON
+    def _clean(v):
+        if isinstance(v, float) and (np.isnan(v) or np.isinf(v)):
+            return None
+        return v
+
+    clean_results = {k: _clean(v) for k, v in results.items()}
+    return hf_write_file(path, json.dumps(clean_results, indent=2, default=str),
                          f"Option {option.upper()} sweep {start_year} — {today_est}")
 
 
