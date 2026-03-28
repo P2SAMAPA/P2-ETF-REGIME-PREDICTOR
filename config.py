@@ -13,7 +13,7 @@ GITHUB_REPO = os.environ.get("GITHUB_REPO", "P2SAMAPA/P2-ETF-REGIME-PREDICTOR")
 GH_PAT      = os.environ.get("GH_PAT", "")
 
 # ── Option A — FI / Commodities ETFs ─────────────────────────────────────────
-OPTION_A_ETFS = ["TLT", "VNQ", "SLV", "GLD", "LQD", "HYG"]
+OPTION_A_ETFS       = ["TLT", "VNQ", "SLV", "GLD", "LQD", "HYG"]
 OPTION_A_BENCHMARKS = ["SPY", "AGG"]
 OPTION_A_ALL_TICKERS = OPTION_A_ETFS + OPTION_A_BENCHMARKS
 
@@ -30,8 +30,10 @@ OPTION_A_HF = {
 }
 
 # ── Option B — Equity ETFs ────────────────────────────────────────────────────
+# SPY removed from tradeable universe — kept only as benchmark reference.
+# Having SPY as both a tradeable ETF and benchmark creates a trivial
+# "beats benchmark" situation and distorts conviction scores.
 OPTION_B_ETFS = [
-    "SPY",  # S&P 500
     "QQQ",  # NASDAQ 100
     "XLK",  # Technology
     "XLF",  # Financials
@@ -44,7 +46,7 @@ OPTION_B_ETFS = [
     "GDX",  # Gold Miners
     "XME",  # Metals & Mining
 ]
-OPTION_B_BENCHMARKS = ["SPY", "QQQ"]  # SPY already in universe, used as benchmark ref
+OPTION_B_BENCHMARKS  = ["SPY", "QQQ"]   # SPY = primary benchmark, QQQ already in universe
 OPTION_B_ALL_TICKERS = list(dict.fromkeys(OPTION_B_ETFS + OPTION_B_BENCHMARKS))  # deduplicated
 
 # HF namespaced paths for Option B
@@ -100,9 +102,10 @@ WINDOWS = [
     {"id": 12, "train_start": "2008-01-01", "train_end": "2021-12-31", "test_year": "2022"},
     {"id": 13, "train_start": "2008-01-01", "train_end": "2022-12-31", "test_year": "2023"},
     {"id": 14, "train_start": "2008-01-01", "train_end": "2023-12-31", "test_year": "2024"},
+    {"id": 15, "train_start": "2008-01-01", "train_end": "2024-12-31", "test_year": "2025"},
 ]
 
-# ── Sweep years for consensus (used in app.py) ────────────────────────────────
+# ── Sweep years for consensus ─────────────────────────────────────────────────
 SWEEP_YEARS = [2011, 2013, 2015, 2017, 2019, 2021, 2023]
 
 # ── ETF display colours ───────────────────────────────────────────────────────
@@ -115,7 +118,7 @@ ETF_COLORS = {
     "XLE": "#bab0ac", "XLV": "#499894", "XLI": "#86bcb6",
     "XLY": "#e15759", "XLP": "#79706e", "XLU": "#d37295",
     "GDX": "#edc948", "XME": "#b07aa1",
-    # Shared
+    # Benchmarks
     "SPY": "#4e79a7", "AGG": "#76b7b2", "CASH": "#aaaaaa",
 }
 
