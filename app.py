@@ -422,15 +422,22 @@ def render_single_year_tab(option: str, target_etfs: list, params: dict):
 def _compute_consensus(sweep_data: dict) -> dict:
     if not sweep_data:
         return {}
+    def _safe(v, default=0.0):
+        try:
+            f = float(v)
+            return default if (f != f) else f  # f != f catches NaN
+        except (TypeError, ValueError):
+            return default
+
     rows = []
     for yr, sig in sweep_data.items():
         rows.append({
             "year":       int(yr),
             "signal":     sig.get("signal", "?"),
-            "ann_return": float(sig.get("ann_return", 0.0)),
-            "z_score":    float(sig.get("z_score", 0.0)),
-            "sharpe":     float(sig.get("sharpe", 0.0)),
-            "max_dd":     float(sig.get("max_dd", 0.0)),
+            "ann_return": _safe(sig.get("ann_return"), 0.0),
+            "z_score":    _safe(sig.get("z_score"),    0.0),
+            "sharpe":     _safe(sig.get("sharpe"),     0.0),
+            "max_dd":     _safe(sig.get("max_dd"),     0.0),
             "conviction": sig.get("conviction", "?"),
             "regime":     sig.get("regime", "?"),
         })
