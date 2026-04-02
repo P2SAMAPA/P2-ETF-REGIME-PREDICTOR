@@ -396,7 +396,6 @@ def render_single_year_tab(option: str, target_etfs: list, params: dict):
     # Determine available test years from the WF predictions index
     available_years = sorted(set(wf_preds.index.year))
     # Filter to years that are in the original WINDOWS (or any year present)
-    # Also include 2025 if present, etc.
     # We'll just show all years present.
     # For UI, we want to separate historical (<=2025) from YTD
     historical_years = [y for y in available_years if y <= 2025]
@@ -443,6 +442,17 @@ def render_single_year_tab(option: str, target_etfs: list, params: dict):
             st.warning(f"No predictions found for {current_year} yet.")
             return
 
+        # Ensure we only have columns that are in target_etfs
+        # and also exist in the predictions
+        available_etfs = [etf for etf in target_etfs if etf in ytd_preds.columns]
+        if not available_etfs:
+            st.error(f"None of the target ETFs {target_etfs} found in predictions. Available columns: {list(ytd_preds.columns)}")
+            return
+        if len(available_etfs) < len(target_etfs):
+            missing = set(target_etfs) - set(available_etfs)
+            st.warning(f"Missing predictions for: {', '.join(missing)}. Using only available ETFs: {available_etfs}")
+        ytd_preds = ytd_preds[available_etfs]
+
         st.info(
             f"**{ytd_label}** — {len(ytd_preds)} trading days "
             f"({ytd_preds.index[0].date()} → {ytd_preds.index[-1].date()}). "
@@ -450,13 +460,13 @@ def render_single_year_tab(option: str, target_etfs: list, params: dict):
             icon="ℹ️",
         )
 
-        result = run_strategy(ytd_preds, df, target_etfs, params)
+        result = run_strategy(ytd_preds, df, available_etfs, params)
         if not result:
             return
 
         st.success(f"{ytd_label} — {len(ytd_preds)} trading days")
         st.divider()
-        _render_results(result, target_etfs, option,
+        _render_results(result, available_etfs, option,
                         suffix=f"ytd_{current_year}",
                         banner_label=f"Latest Signal — {result['pred_bt'].index[-1].strftime('%b %d, %Y')}")
         return
@@ -498,8 +508,15 @@ def render_single_year_tab(option: str, target_etfs: list, params: dict):
     pred_df = year_preds.drop(columns=[c for c in year_preds.columns
                                         if c not in target_etfs],
                               errors='ignore')
-    # Ensure we only have target_etfs columns
-    pred_df = pred_df[target_etfs]
+    # Ensure we only have target_etfs columns that actually exist in pred_df
+    available_etfs = [etf for etf in target_etfs if etf in pred_df.columns]
+    if not available_etfs:
+        st.error(f"None of the target ETFs {target_etfs} found in predictions for year {year}. Available columns: {list(pred_df.columns)}")
+        return
+    if len(available_etfs) < len(target_etfs):
+        missing = set(target_etfs) - set(available_etfs)
+        st.warning(f"Missing predictions for: {', '.join(missing)}. Using only available ETFs: {available_etfs}")
+    pred_df = pred_df[available_etfs]
 
     st.success(
         f"Walk-forward OOS — {year} — Training start: {selected_start} — "
@@ -508,11 +525,11 @@ def render_single_year_tab(option: str, target_etfs: list, params: dict):
     )
     st.divider()
 
-    result = run_strategy(pred_df, df, target_etfs, params)
+    result = run_strategy(pred_df, df, available_etfs, params)
     if not result:
         return
 
-    _render_results(result, target_etfs, option,
+    _render_results(result, available_etfs, option,
                     suffix=f"sy_{year}_{selected_start}",
                     banner_label=f"Year-End {year}")
 
