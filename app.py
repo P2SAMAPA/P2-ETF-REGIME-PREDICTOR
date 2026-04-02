@@ -29,13 +29,6 @@ import pickle
 
 import config as cfg
 
-# Avoid circular imports by importing the whole module and accessing functions via dot notation
-try:
-    import data_manager_hf as dm
-except Exception as e:
-    st.error(f"Failed to import data_manager_hf: {e}")
-    sys.exit(1)
-
 # Import other modules (these should not cause circular imports)
 try:
     from regime_detection import RegimeDetector
@@ -109,11 +102,12 @@ def _extract_prediction_columns(pred_df: pd.DataFrame, target_etfs: list) -> pd.
     return result
 
 
-# ── Cached loaders (ttl=0: always fresh) ─────────────────────────────────────
+# ── Cached loaders (using local imports to avoid circular issues) ─────────────
 
 @st.cache_resource(ttl=0)
 def _load_detector(option: str):
     try:
+        import data_manager_hf as dm
         b = dm.load_detector(option)
         return RegimeDetector.from_bytes(b) if b else None
     except Exception:
@@ -122,23 +116,27 @@ def _load_detector(option: str):
 
 @st.cache_data(ttl=0)
 def _load_wf_preds(option: str) -> pd.DataFrame:
+    import data_manager_hf as dm
     df = dm.load_wf_predictions(option, force_download=True)
     return df if df is not None else pd.DataFrame()
 
 
 @st.cache_data(ttl=0)
 def _load_insample_preds(option: str) -> pd.DataFrame:
+    import data_manager_hf as dm
     df = dm.load_predictions(option)
     return df if df is not None else pd.DataFrame()
 
 
 @st.cache_data(ttl=0)
 def _load_dataset(option: str, start_year: int) -> pd.DataFrame:
+    import data_manager_hf as dm
     return dm.get_data(option=option, start_year=start_year, force_refresh=False)
 
 
 @st.cache_data(ttl=0)
 def _load_sweep(option: str) -> tuple:
+    import data_manager_hf as dm
     return dm.load_sweep_results(option)
 
 
@@ -419,7 +417,6 @@ def render_single_year_tab(option: str, target_etfs: list, params: dict):
         if "train_start" in wf_preds.columns:
             train_vals = sorted(wf_preds["train_start"].unique())
             st.write(f"✅ 'train_start' column exists. Unique values: {train_vals}")
-            # Also show a sample of rows with date range
             st.write(f"Date range of predictions: {wf_preds.index.min()} → {wf_preds.index.max()}")
             sample_rows = wf_preds[["train_start"]].head(3)
             st.dataframe(sample_rows)
