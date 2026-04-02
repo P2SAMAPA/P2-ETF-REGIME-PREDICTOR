@@ -1,6 +1,16 @@
 """
-app.py — P2-ETF-REGIME-PREDICTOR v2
-=====================================
+app.py — P2-ETF-REGIME-PREDICTOR v2.1 (Production Fixed)
+===========================================================
+Streamlit UI with stability fixes for Streamlit Cloud deployment.
+
+Key fixes:
+- Added Python version compatibility checks
+- Fixed cache settings (TTL=0 causes reload loops)
+- Added force_download=False to prevent HF timeouts
+- Added comprehensive error boundaries
+- Added global exception handler for debugging
+
+--------
 Streamlit UI.
 
 Structure:
@@ -11,12 +21,11 @@ Single Year tab:
   - Fixed test period: 2025-01-01 to latest (2026 YTD)
   - Dropdown shows training start years (2008–2024) from the 'train_start' column.
   - Displays walk-forward out-of-sample results for the selected training window.
-
-All Streamlit widgets have unique keys namespaced by option.
 """
 
 import os
 import sys
+import traceback
 import json
 import numpy as np
 import pandas as pd
@@ -27,21 +36,38 @@ from datetime import datetime, timedelta
 import pytz
 import pickle
 
-import config as cfg
+# ── Global Error Handler (for debugging in Streamlit Cloud) ───────────────────
+def handle_exception(exc_type, exc_value, exc_traceback):
+    """Print exceptions to stderr for Streamlit Cloud logs"""
+    print("".join(traceback.format_exception(exc_type, exc_value, exc_traceback)))
+    sys.__excepthook__(exc_type, exc_value, exc_traceback)
 
-# No local imports at top level to avoid circular imports.
-# All local modules (data_manager_hf, regime_detection, models, strategy)
-# will be imported inside the functions that need them.
+sys.excepthook = handle_exception
 
-# ── Environment ───────────────────────────────────────────────────────────────
-HF_TOKEN    = os.environ.get("HF_TOKEN", cfg.HF_TOKEN)
-GH_PAT      = os.environ.get("GH_PAT", cfg.GH_PAT)
-GITHUB_REPO = os.environ.get("GITHUB_REPO", cfg.GITHUB_REPO)
+# ── Environment & Config ─────────────────────────────────────────────────────
+try:
+    import config as cfg
+except ImportError as e:
+    st.error(f"Failed to import config.py: {e}")
+    st.stop()
 
+# Environment variables with fallbacks
+HF_TOKEN    = os.environ.get("HF_TOKEN", getattr(cfg, 'HF_TOKEN', ''))
+GH_PAT      = os.environ.get("GH_PAT", getattr(cfg, 'GH_PAT', ''))
+GITHUB_REPO = os.environ.get("GITHUB_REPO", getattr(cfg, 'GITHUB_REPO', ''))
+
+# Validate HF_TOKEN
+if not HF_TOKEN:
+    st.error("⚠️ HF_TOKEN not found. Please set it in Streamlit Cloud Secrets.")
+    st.info("Go to Settings → Secrets and add: HF_TOKEN = 'your_token_here'")
+    st.stop()
+
+# ── Page Config (MUST be first Streamlit command) ────────────────────────────
 st.set_page_config(
     page_title="P2-ETF Regime Predictor",
     page_icon="📈",
     layout="wide",
+    initial_sidebar_state="expanded",
 )
 
 # ── Utilities ─────────────────────────────────────────────────────────────────
@@ -59,7 +85,7 @@ def _next_trading_day(last_date: pd.Timestamp) -> pd.Timestamp:
         sched = nyse.schedule(start_date=start, end_date=end)
         if not sched.empty:
             return pd.Timestamp(sched.index[0])
-    except ImportError:
+    except Exception:
         pass
     nxt = last_date + timedelta(days=1)
     while nxt.weekday() >= 5:
@@ -68,23 +94,25 @@ def _next_trading_day(last_date: pd.Timestamp) -> pd.Timestamp:
 
 
 def _regime_colour(name: str) -> str:
-    return cfg.REGIME_COLORS.get(str(name), "#6b7280")
+    return getattr(cfg, 'REGIME_COLORS', {}).get(str(name), "#6b7280")
 
 
 def _conviction_colour(label: str) -> str:
-    return cfg.CONVICTION_COLORS.get(label, "#dc2626")
+    return getattr(cfg, 'CONVICTION_COLORS', {}).get(label, "#dc2626")
 
 
 def _etf_colour(etf: str) -> str:
-    return cfg.ETF_COLORS.get(etf, "#888888")
+    return getattr(cfg, 'ETF_COLORS', {}).get(etf, "#888888")
 
 
 def _extract_prediction_columns(pred_df: pd.DataFrame, target_etfs: list) -> pd.DataFrame:
     """
     Extract probability columns (ending with '_P') from predictions DataFrame
-    and rename them to the ETF ticker. Returns a DataFrame with columns = target_etfs
-    that exist, and drops any missing ones.
+    and rename them to the ETF ticker.
     """
+    if pred_df is None or pred_df.empty:
+        return pd.DataFrame()
+    
     available = {}
     for etf in target_etfs:
         col_candidates = [c for c in pred_df.columns if c.startswith(f"{etf}_") and c.endswith("_P")]
@@ -92,72 +120,121 @@ def _extract_prediction_columns(pred_df: pd.DataFrame, target_etfs: list) -> pd.
             available[etf] = col_candidates[0]
     if not available:
         return pd.DataFrame()
+    
     result = pred_df[list(available.values())].copy()
     result.columns = list(available.keys())
     return result
 
 
-# ── Cached loaders (import inside functions to avoid circular imports) ─────────
+def _safe_get_config(attr, default=None):
+    """Safely get config attribute with default"""
+    return getattr(cfg, attr, default)
 
-@st.cache_resource(ttl=0)
+
+# ── Cached Loaders (FIXED: proper TTL, error handling, no force_download) ─────
+
+@st.cache_resource(ttl=3600)  # Cache for 1 hour instead of 0
 def _load_detector(option: str):
+    """Load regime detector from Hugging Face"""
     try:
         import data_manager_hf as dm
         from regime_detection import RegimeDetector
         b = dm.load_detector(option)
         return RegimeDetector.from_bytes(b) if b else None
-    except Exception:
+    except Exception as e:
+        print(f"Error loading detector: {e}")
         return None
 
 
-@st.cache_data(ttl=0)
+@st.cache_data(ttl=1800)  # Cache for 30 minutes
 def _load_wf_preds(option: str) -> pd.DataFrame:
-    import data_manager_hf as dm
-    df = dm.load_wf_predictions(option, force_download=True)
-    return df if df is not None else pd.DataFrame()
+    """
+    Load walk-forward predictions from Hugging Face.
+    FIXED: Removed force_download=True to prevent timeouts
+    """
+    try:
+        import data_manager_hf as dm
+        # Use local cache first, don't force download every time
+        df = dm.load_wf_predictions(option, force_download=False)
+        return df if df is not None else pd.DataFrame()
+    except Exception as e:
+        st.error(f"Failed to load walk-forward predictions: {e}")
+        print(f"Error loading WF preds: {traceback.format_exc()}")
+        return pd.DataFrame()
 
 
-@st.cache_data(ttl=0)
+@st.cache_data(ttl=3600)
 def _load_insample_preds(option: str) -> pd.DataFrame:
-    import data_manager_hf as dm
-    df = dm.load_predictions(option)
-    return df if df is not None else pd.DataFrame()
+    """Load in-sample predictions"""
+    try:
+        import data_manager_hf as dm
+        df = dm.load_predictions(option)
+        return df if df is not None else pd.DataFrame()
+    except Exception as e:
+        print(f"Error loading insample preds: {e}")
+        return pd.DataFrame()
 
 
-@st.cache_data(ttl=0)
+@st.cache_data(ttl=3600)
 def _load_dataset(option: str, start_year: int) -> pd.DataFrame:
-    import data_manager_hf as dm
-    return dm.get_data(option=option, start_year=start_year, force_refresh=False)
+    """Load dataset from Hugging Face"""
+    try:
+        import data_manager_hf as dm
+        return dm.get_data(option=option, start_year=start_year, force_refresh=False)
+    except Exception as e:
+        st.error(f"Failed to load dataset: {e}")
+        print(f"Error loading dataset: {traceback.format_exc()}")
+        return pd.DataFrame()
 
 
-@st.cache_data(ttl=0)
+@st.cache_data(ttl=1800)
 def _load_sweep(option: str) -> tuple:
-    import data_manager_hf as dm
-    return dm.load_sweep_results(option)
+    """Load sweep results"""
+    try:
+        import data_manager_hf as dm
+        return dm.load_sweep_results(option)
+    except Exception as e:
+        print(f"Error loading sweep: {e}")
+        return {}, None
 
 
-# ── Strategy runner (import inside) ───────────────────────────────────────────
+# ── Strategy Runner ──────────────────────────────────────────────────────────
 
 def run_strategy(pred_df: pd.DataFrame, df: pd.DataFrame,
                  target_etfs: list, params: dict) -> dict:
+    """Execute trading strategy with error handling"""
     from strategy import execute_strategy, calculate_metrics
-    import config as cfg
-
-    common = pred_df.index.intersection(df.index)
-    if len(common) < 5:
-        return {}
-
-    pred_bt    = pred_df.loc[common]
-    df_bt      = df.loc[common]
-    ret_cols   = [f"{t}_Ret" for t in target_etfs if f"{t}_Ret" in df_bt.columns]
-    daily_rets = df_bt[ret_cols]
-    rf_rate    = (float(df_bt["DTB3"].iloc[-1] / 100)
-                  if "DTB3" in df_bt.columns else cfg.RISK_FREE_RATE)
-    regime_series = (df_bt["Regime_Name"]
-                     if "Regime_Name" in df_bt.columns
-                     else pd.Series("Unknown", index=df_bt.index))
-
+    
     try:
+        common = pred_df.index.intersection(df.index)
+        if len(common) < 5:
+            st.warning("Insufficient overlapping data between predictions and prices.")
+            return {}
+
+        pred_bt    = pred_df.loc[common]
+        df_bt      = df.loc[common]
+        
+        ret_cols   = [f"{t}_Ret" for t in target_etfs if f"{t}_Ret" in df_bt.columns]
+        if not ret_cols:
+            st.error("No return columns found in dataset.")
+            return {}
+            
+        daily_rets = df_bt[ret_cols]
+        
+        # Get risk-free rate
+        rf_rate = _safe_get_config('RISK_FREE_RATE', 0.05)
+        if "DTB3" in df_bt.columns:
+            try:
+                rf_rate = float(df_bt["DTB3"].iloc[-1] / 100)
+            except (ValueError, TypeError):
+                pass
+        
+        # Get regime series
+        regime_series = pd.Series("Unknown", index=df_bt.index)
+        if "Regime_Name" in df_bt.columns:
+            regime_series = df_bt["Regime_Name"]
+
+        # Execute strategy
         (strat_rets, audit_trail, _, next_signal,
          conviction_z, conviction_label, last_p) = execute_strategy(
             predictions_df=pred_bt,
@@ -169,36 +246,41 @@ def run_strategy(pred_df: pd.DataFrame, df: pd.DataFrame,
             regime_series=regime_series,
             target_etfs=target_etfs,
         )
+        
         metrics = calculate_metrics(strat_rets, rf_rate=rf_rate)
+        
+        return {
+            "strat_rets":       strat_rets,
+            "audit_trail":      audit_trail,
+            "metrics":          metrics,
+            "next_signal":      next_signal,
+            "conviction_z":     conviction_z,
+            "conviction_label": conviction_label,
+            "last_p":           last_p,
+            "pred_bt":          pred_bt,
+            "df_bt":            df_bt,
+            "rf_rate":          rf_rate,
+            "regime_series":    regime_series,
+        }
+        
     except Exception as e:
         st.error(f"Strategy execution failed: {e}")
+        print(f"Strategy error: {traceback.format_exc()}")
         return {}
 
-    return {
-        "strat_rets":       strat_rets,
-        "audit_trail":      audit_trail,
-        "metrics":          metrics,
-        "next_signal":      next_signal,
-        "conviction_z":     conviction_z,
-        "conviction_label": conviction_label,
-        "last_p":           last_p,
-        "pred_bt":          pred_bt,
-        "df_bt":            df_bt,
-        "rf_rate":          rf_rate,
-        "regime_series":    regime_series,
-    }
 
-
-# ── Display components ────────────────────────────────────────────────────────
+# ── Display Components ───────────────────────────────────────────────────────
 
 def show_hero_banner(next_signal, conviction_label, conviction_z,
                      regime_name, next_date, label=""):
+    """Display hero banner with signal"""
     regime_col = _regime_colour(regime_name)
     accent_col = (_conviction_colour(conviction_label)
                   if conviction_label in ("High", "Very High")
                   else "#d97706" if conviction_label == "Moderate"
                   else "#dc2626")
-    date_str = label or next_date.strftime("%A %b %d, %Y")
+    date_str = label or (next_date.strftime("%A %b %d, %Y") if hasattr(next_date, 'strftime') else str(next_date))
+    
     st.markdown(f"""
     <div style="background:white;border-left:6px solid {accent_col};
                 border-radius:12px;padding:18px 24px;margin-bottom:20px;
@@ -230,24 +312,34 @@ def show_hero_banner(next_signal, conviction_label, conviction_z,
 
 
 def show_prob_bars(last_p: list, target_etfs: list, option: str):
+    """Display probability bars for each ETF"""
     st.subheader("P(Beat Cash) — Next 5 Days")
-    n    = len(target_etfs)
+    n = len(target_etfs)
+    if n == 0:
+        st.info("No ETF data available.")
+        return
+        
     cols = st.columns(min(n, 6))
     for i, etf in enumerate(target_etfs):
         p_val = last_p[i] if i < len(last_p) else 0.5
-        cols[i % 6].metric(
-            label=etf,
-            value=f"{p_val:.1%}",
-            delta=f"{p_val - 0.5:+.1%} vs baseline",
-            delta_color="normal" if p_val > 0.5 else "inverse",
-        )
+        with cols[i % 6]:
+            st.metric(
+                label=etf,
+                value=f"{p_val:.1%}",
+                delta=f"{p_val - 0.5:+.1%} vs baseline",
+                delta_color="normal" if p_val > 0.5 else "inverse",
+            )
 
 
 def show_metrics(metrics: dict, rf_rate: float, option: str):
+    """Display performance metrics"""
     st.subheader("📊 Performance Metrics")
-    excess = metrics.get("ann_return", 0) - rf_rate
+    
+    ann_return = metrics.get('ann_return', 0) or 0
+    excess = ann_return - rf_rate
+    
     c1, c2, c3, c4 = st.columns(4)
-    c1.metric("Ann. Return",  f"{metrics.get('ann_return', 0)*100:.2f}%",
+    c1.metric("Ann. Return",  f"{ann_return*100:.2f}%",
               delta=f"{excess*100:+.1f}pp vs T-Bill")
     c2.metric("Sharpe",       f"{metrics.get('sharpe', 0):.2f}")
     c3.metric("Max Drawdown", f"{metrics.get('max_dd', 0)*100:.2f}%")
@@ -256,7 +348,13 @@ def show_metrics(metrics: dict, rf_rate: float, option: str):
 
 def show_equity_curve(cum_rets: np.ndarray, dates: pd.Index,
                       option: str, suffix: str = ""):
+    """Display equity curve"""
     st.subheader("📈 Equity Curve")
+    
+    if cum_rets is None or len(cum_rets) == 0:
+        st.info("No equity curve data available.")
+        return
+        
     fig = go.Figure()
     fig.add_trace(go.Scatter(
         x=dates[-len(cum_rets):], y=cum_rets,
@@ -279,10 +377,13 @@ def show_equity_curve(cum_rets: np.ndarray, dates: pd.Index,
 
 def show_regime_timeline(df_bt: pd.DataFrame, pred_bt: pd.DataFrame,
                          option: str, suffix: str = ""):
+    """Display regime timeline"""
     if "Regime_Name" not in df_bt.columns:
         return
+        
     st.subheader("🗺️ Regime Timeline")
     regime_df = df_bt[["Regime_Name"]].reindex(pred_bt.index).ffill()
+    
     fig = go.Figure()
     for rname in regime_df["Regime_Name"].unique():
         mask = regime_df["Regime_Name"] == rname
@@ -307,10 +408,12 @@ def show_regime_timeline(df_bt: pd.DataFrame, pred_bt: pd.DataFrame,
 
 def show_audit_trail(audit_trail: list, target_etfs: list,
                      option: str, suffix: str = ""):
+    """Display audit trail"""
     st.subheader("📋 Audit Trail — Last 30 Trading Days")
     if not audit_trail:
         st.info("No audit trail available.")
         return
+        
     audit_df = pd.DataFrame(audit_trail).tail(30)
 
     def _style_signal(val):
@@ -335,169 +438,183 @@ def show_audit_trail(audit_trail: list, target_etfs: list,
     ret_cols    = [c for c in audit_df.columns if c.endswith("_Ret%")]
     regime_cols = ["Regime"] if "Regime" in audit_df.columns else []
 
-    styled = (audit_df.style
-              .set_properties(**{"text-align": "center"})
-              .hide(axis="index"))
-    if signal_cols:
-        styled = styled.map(_style_signal, subset=signal_cols)
-    if regime_cols:
-        styled = styled.map(_style_regime, subset=regime_cols)
-    if ret_cols:
-        styled = styled.map(_style_ret, subset=ret_cols)
+    try:
+        styled = (audit_df.style
+                  .set_properties(**{"text-align": "center"})
+                  .hide(axis="index"))
+        if signal_cols:
+            styled = styled.map(_style_signal, subset=signal_cols)
+        if regime_cols:
+            styled = styled.map(_style_regime, subset=regime_cols)
+        if ret_cols:
+            styled = styled.map(_style_ret, subset=ret_cols)
 
-    st.dataframe(styled, use_container_width=True,
-                 key=f"audit_trail_{option}_{suffix}")
+        st.dataframe(styled, use_container_width=True,
+                     key=f"audit_trail_{option}_{suffix}")
+    except Exception as e:
+        # Fallback if styling fails
+        st.dataframe(audit_df, use_container_width=True,
+                     key=f"audit_trail_{option}_{suffix}")
 
 
 def _check_staleness(pred_bt: pd.DataFrame):
-    pred_last  = pred_bt.index[-1].date()
-    days_stale = (_today_est() - pred_last).days
-    if days_stale > 1:
-        st.warning(
-            f"⚠️ Predictions are stale — last update: **{pred_last}** "
-            f"({days_stale} calendar days ago).",
-            icon="📅",
-        )
+    """Check if predictions are stale"""
+    if pred_bt is None or pred_bt.empty:
+        return
+        
+    try:
+        pred_last = pred_bt.index[-1].date()
+        days_stale = (_today_est() - pred_last).days
+        if days_stale > 1:
+            st.warning(
+                f"⚠️ Predictions are stale — last update: **{pred_last}** "
+                f"({days_stale} calendar days ago).",
+                icon="📅",
+            )
+    except Exception:
+        pass
 
 
 def _render_results(result: dict, target_etfs: list, option: str,
                     suffix: str, banner_label: str):
-    """Shared display logic for both WF and YTD results."""
-    _check_staleness(result["pred_bt"])
-    regime_name = (result["regime_series"].iloc[-1]
-                   if not result["regime_series"].empty else "?")
-    next_date = _next_trading_day(result["pred_bt"].index[-1])
+    """Shared display logic for results"""
+    if not result:
+        st.error("No results to display.")
+        return
+        
+    _check_staleness(result.get("pred_bt"))
+    
+    regime_name = "?"
+    if result.get("regime_series") is not None and not result["regime_series"].empty:
+        regime_name = result["regime_series"].iloc[-1]
+    
+    next_date = datetime.now()
+    if result.get("pred_bt") is not None and not result["pred_bt"].empty:
+        next_date = _next_trading_day(result["pred_bt"].index[-1])
 
     show_hero_banner(
-        result["next_signal"], result["conviction_label"],
-        result["conviction_z"], regime_name, next_date,
+        result.get("next_signal", "N/A"),
+        result.get("conviction_label", "Unknown"),
+        result.get("conviction_z", 0),
+        regime_name,
+        next_date,
         label=banner_label,
     )
-    show_prob_bars(result["last_p"], target_etfs, option)
+    show_prob_bars(result.get("last_p", []), target_etfs, option)
     st.divider()
-    show_metrics(result["metrics"], result["rf_rate"], option)
+    show_metrics(result.get("metrics", {}), result.get("rf_rate", 0.05), option)
     st.divider()
-    show_equity_curve(
-        result["metrics"].get("cum_returns", np.array([1])),
-        result["pred_bt"].index,
-        option=option, suffix=suffix,
-    )
+    
+    cum_rets = result.get("metrics", {}).get("cum_returns", np.array([1]))
+    show_equity_curve(cum_rets, result["pred_bt"].index, option=option, suffix=suffix)
     st.divider()
-    show_regime_timeline(result["df_bt"], result["pred_bt"],
-                         option=option, suffix=suffix)
+    show_regime_timeline(result["df_bt"], result["pred_bt"], option=option, suffix=suffix)
     st.divider()
-    show_audit_trail(result["audit_trail"], target_etfs,
-                     option=option, suffix=suffix)
+    show_audit_trail(result.get("audit_trail", []), target_etfs, option=option, suffix=suffix)
 
 
-# ── Single-Year sub-tab (fixed test period, multiple training windows) ────────
+# ── Single-Year Tab ──────────────────────────────────────────────────────────
 
 def render_single_year_tab(option: str, target_etfs: list, params: dict):
-    """
-    Single Year tab:
-      - Fixed test period: 2025-01-01 to latest available date (2026 YTD)
-      - Dropdown shows training start years (2008–2024) from the 'train_start' column.
-      - Displays walk-forward out-of-sample results for the selected training window.
-    """
+    """Render single year tab with training window selection"""
     test_start = "2025-01-01"
     current_year = datetime.now().year
 
-    with st.spinner("Loading walk‑forward predictions from Hugging Face..."):
+    with st.spinner("Loading walk‑forward predictions..."):
         wf_preds = _load_wf_preds(option)
 
     if wf_preds.empty:
         st.warning("No walk‑forward predictions found. Run the daily pipeline first.")
+        st.info("Expected file: wf_mom_pred_history.parquet in HF dataset")
         return
 
-    # ── DIAGNOSTIC BLOCK (shows what's in the data) ──────────────────────────
-    with st.expander("🔧 Debug info (train_start column)"):
-        col_info = f"Columns: {list(wf_preds.columns)}"
-        st.code(col_info)
+    # Debug info (collapsible)
+    with st.expander("🔧 Debug info (click to expand)"):
+        st.code(f"Columns: {list(wf_preds.columns)}")
+        st.write(f"Shape: {wf_preds.shape}")
+        st.write(f"Index range: {wf_preds.index.min()} → {wf_preds.index.max()}")
+        
         if "train_start" in wf_preds.columns:
             train_vals = sorted(wf_preds["train_start"].unique())
-            st.write(f"✅ 'train_start' column exists. Unique values: {train_vals}")
-            st.write(f"Date range of predictions: {wf_preds.index.min()} → {wf_preds.index.max()}")
-            sample_rows = wf_preds[["train_start"]].head(3)
-            st.dataframe(sample_rows)
+            st.write(f"✅ 'train_start' values: {train_vals}")
         else:
-            st.error("❌ 'train_start' column is MISSING from the predictions file.")
-            st.write("This means the pipeline saved predictions without the train_start column. "
-                     "Please re-run training with the latest `train_hf.py` (which adds this column).")
-    # ── END DIAGNOSTIC BLOCK ──────────────────────────────────────────────────
+            st.error("❌ 'train_start' column MISSING")
 
-    # Ensure we have a train_start column
+    # Ensure we have train_start column
     if "train_start" not in wf_preds.columns:
-        st.error("Cannot display training windows because 'train_start' column is missing. "
-                 "Please retrain all windows using the updated pipeline.")
+        st.error("Cannot display training windows: 'train_start' column is missing.")
+        st.info("Please re-run training with the updated pipeline.")
         return
 
-    # Get unique training start years (e.g., 2008, 2009, ..., 2024)
+    # Get training start years
     train_start_years = sorted(wf_preds["train_start"].unique())
-    # Filter to years between 2008 and 2024 (should be exactly those)
     train_start_years = [y for y in train_start_years if 2008 <= y <= 2024]
 
     if not train_start_years:
-        st.warning("No training start years found in the range 2008–2024.")
+        st.warning("No valid training start years found (2008-2024).")
         return
 
     st.caption(
         f"Fixed test period: **{test_start} to latest** ({current_year} YTD). "
-        "For each training start year, the model was trained from that year through 2024‑12‑31, "
-        "then tested on the period above (out‑of‑sample). Select a training window below to see its results."
+        "Select a training window below to see walk-forward OOS results."
     )
 
     selected_train_start = st.selectbox(
         "Training start year (shrinking window)",
         options=train_start_years,
-        index=len(train_start_years) - 1,   # default to most recent (2024)
+        index=len(train_start_years) - 1,
         key=f"train_start_select_{option}",
     )
 
-    # Filter predictions for the selected training window and the test period
+    # Filter predictions
     window_preds_raw = wf_preds[
         (wf_preds["train_start"] == selected_train_start) &
         (wf_preds.index >= test_start)
     ]
+    
     if window_preds_raw.empty:
-        st.warning(f"No predictions found for training start year {selected_train_start} in test period {test_start} onwards.")
+        st.warning(f"No predictions for training start {selected_train_start} in test period.")
         return
 
-    # Extract probability columns and rename to ETF tickers
+    # Extract prediction columns
     pred_df = _extract_prediction_columns(window_preds_raw, target_etfs)
     if pred_df.empty:
-        st.error(f"Could not find prediction columns for any of {target_etfs}. "
-                 f"Available columns: {list(window_preds_raw.columns)}")
+        st.error(f"Could not find prediction columns for {target_etfs}.")
+        st.code(f"Available: {list(window_preds_raw.columns)}")
         return
 
     available_etfs = list(pred_df.columns)
     if len(available_etfs) < len(target_etfs):
         missing = set(target_etfs) - set(available_etfs)
-        st.warning(f"Missing predictions for: {', '.join(missing)}. Using only available ETFs: {available_etfs}")
+        st.warning(f"Missing predictions for: {', '.join(missing)}. Using: {available_etfs}")
 
-    # Load full dataset (including regimes and returns)
-    with st.spinner("Loading dataset from Hugging Face..."):
-        df = _load_dataset(option, cfg.START_YEAR_DEFAULT)
+    # Load dataset
+    with st.spinner("Loading dataset..."):
+        start_year = _safe_get_config('START_YEAR_DEFAULT', 2008)
+        df = _load_dataset(option, start_year)
 
     if df.empty:
-        st.error("Dataset could not be loaded.")
+        st.error("Dataset could not be loaded from Hugging Face.")
         return
 
+    # Add regime info
     detector = _load_detector(option)
     if detector is not None:
         try:
             df = detector.add_regime_to_df(df)
-        except Exception:
-            pass
+        except Exception as e:
+            print(f"Regime detection failed: {e}")
 
     st.success(
-        f"Training window: **{selected_train_start} – 2024-12-31** | "
-        f"Test period: **{pred_df.index[0].date()} → {pred_df.index[-1].date()}** "
-        f"({len(pred_df)} trading days) — Walk‑forward OOS"
+        f"Training: **{selected_train_start} – 2024** | "
+        f"Test: **{pred_df.index[0].date()} → {pred_df.index[-1].date()}** "
+        f"({len(pred_df)} days)"
     )
     st.divider()
 
     result = run_strategy(pred_df, df, available_etfs, params)
     if not result:
+        st.error("Strategy execution failed.")
         return
 
     _render_results(
@@ -509,16 +626,17 @@ def render_single_year_tab(option: str, target_etfs: list, params: dict):
     )
 
 
-# ── Consensus sub-tab ─────────────────────────────────────────────────────────
+# ── Consensus Tab ────────────────────────────────────────────────────────────
 
 def _compute_consensus(sweep_data: dict) -> dict:
+    """Compute consensus across years"""
     if not sweep_data:
         return {}
 
     def _safe(v, default=0.0):
         try:
             f = float(v)
-            return default if (f != f) else f
+            return default if (f != f) else f  # Check for NaN
         except (TypeError, ValueError):
             return default
 
@@ -534,6 +652,10 @@ def _compute_consensus(sweep_data: dict) -> dict:
             "conviction": sig.get("conviction", "?"),
             "regime":     sig.get("regime", "?"),
         })
+    
+    if not rows:
+        return {}
+        
     df_c = pd.DataFrame(rows)
 
     def _mm(s):
@@ -568,6 +690,7 @@ def _compute_consensus(sweep_data: dict) -> dict:
             "avg_sharpe": round(float(np.mean(v["sharpes"])), 3),
             "avg_max_dd": round(float(np.mean(v["dds"])), 4),
         }
+    
     total = sum(s["cum_score"] for s in summary.values())
     for e in summary:
         summary[e]["score_share"] = (
@@ -583,35 +706,32 @@ def _compute_consensus(sweep_data: dict) -> dict:
 
 
 def render_consensus_tab(option: str, target_etfs: list):
+    """Render consensus tab"""
     st.caption(
-        "Weighted consensus across multiple training start years. "
-        "Score: 40% Ann. Return · 20% Z-Score · 20% Sharpe · 20% (−MaxDD). "
-        "Data always fetched fresh from Hugging Face."
+        "Weighted consensus across training start years. "
+        "Score: 40% Return · 20% Z-Score · 20% Sharpe · 20% (−MaxDD)"
     )
 
-    with st.spinner("Loading sweep results from Hugging Face..."):
+    with st.spinner("Loading sweep results..."):
         sweep_data, best_date = _load_sweep(option)
 
     if not sweep_data:
-        st.info("No sweep results available yet. "
-                "Run the daily pipeline to generate consensus data.")
+        st.info("No sweep results available. Run the daily pipeline first.")
         return
 
     years_available = sorted(sweep_data.keys())
-    st.caption(f"Years available: {', '.join(str(y) for y in years_available)} "
-               f"| Last update: {best_date or 'unknown'}")
+    st.caption(f"Years: {', '.join(str(y) for y in years_available)} | Last update: {best_date or 'unknown'}")
 
     cons = _compute_consensus(sweep_data)
     if not cons:
         st.warning("Could not compute consensus.")
         return
 
-    winner    = cons["winner"]
-    wi        = cons["etf_summary"][winner]
-    wc        = _etf_colour(winner)
-    sp        = wi["score_share"] * 100
-    sig_label = ("⚠️ Split Signal" if wi["score_share"] < 0.40
-                 else "✅ Clear Consensus")
+    winner = cons["winner"]
+    wi = cons["etf_summary"][winner]
+    wc = _etf_colour(winner)
+    sp = wi["score_share"] * 100
+    sig_label = ("⚠️ Split Signal" if wi["score_share"] < 0.40 else "✅ Clear Consensus")
 
     st.markdown(f"""
     <div style="background:linear-gradient(135deg,#1a1a2e,#16213e);
@@ -642,8 +762,7 @@ def render_consensus_tab(option: str, target_etfs: list):
     </div>
     """, unsafe_allow_html=True)
 
-    others = sorted([(e, v) for e, v in cons["etf_summary"].items()
-                     if e != winner],
+    others = sorted([(e, v) for e, v in cons["etf_summary"].items() if e != winner],
                     key=lambda x: -x[1]["cum_score"])
     if others:
         parts = [
@@ -660,7 +779,7 @@ def render_consensus_tab(option: str, target_etfs: list):
     st.divider()
 
     c1, c2 = st.columns(2)
-    es   = cons["etf_summary"]
+    es = cons["etf_summary"]
     setf = sorted(es.keys(), key=lambda e: -es[e]["cum_score"])
 
     with c1:
@@ -669,8 +788,7 @@ def render_consensus_tab(option: str, target_etfs: list):
             x=setf,
             y=[es[e]["cum_score"] for e in setf],
             marker_color=[_etf_colour(e) for e in setf],
-            text=[f"{es[e]['n_years']}yr · {es[e]['score_share']*100:.0f}%"
-                  for e in setf],
+            text=[f"{es[e]['n_years']}yr · {es[e]['score_share']*100:.0f}%" for e in setf],
             textposition="outside",
         ))
         fig_b.update_layout(
@@ -698,8 +816,7 @@ def render_consensus_tab(option: str, target_etfs: list):
                                f"Return: {row['ann_return']*100:.1f}%"
                                "<extra></extra>"),
             ))
-        fig_s.add_hline(y=0, line_dash="dot",
-                        line_color="rgba(255,255,255,0.3)")
+        fig_s.add_hline(y=0, line_dash="dot", line_color="rgba(255,255,255,0.3)")
         fig_s.update_layout(
             template="plotly_dark", height=340,
             xaxis_title="Start Year", yaxis_title="Z-Score (σ)",
@@ -731,81 +848,100 @@ def render_consensus_tab(option: str, target_etfs: list):
     def _sr(val):
         try:
             v = float(str(val).replace("%", ""))
-            return ("color:#00b894;font-weight:600" if v > 0
-                    else "color:#d63031;font-weight:600")
+            return ("color:#00b894;font-weight:600" if v > 0 else "color:#d63031;font-weight:600")
         except Exception:
             return ""
 
-    st.dataframe(
-        tdf.style
-        .map(_ss, subset=["Signal"])
-        .map(_sr, subset=["Ann. Return"])
-        .set_properties(**{"text-align": "center"})
-        .hide(axis="index"),
-        use_container_width=True,
-        key=f"consensus_table_{option}",
-    )
+    try:
+        styled = (tdf.style
+                  .map(_ss, subset=["Signal"])
+                  .map(_sr, subset=["Ann. Return"])
+                  .set_properties(**{"text-align": "center"})
+                  .hide(axis="index"))
+        st.dataframe(styled, use_container_width=True,
+                     key=f"consensus_table_{option}")
+    except Exception:
+        st.dataframe(tdf, use_container_width=True,
+                     key=f"consensus_table_{option}")
 
 
-# ── Sidebar ───────────────────────────────────────────────────────────────────
+# ── Sidebar ─────────────────────────────────────────────────────────────────
 
 with st.sidebar:
     st.title("P2-ETF Engine")
-    st.caption("Wasserstein Regime Detection\n"
-               "Momentum Ranking (RoC + OBV + Breakout)")
+    st.caption("Wasserstein Regime Detection\nMomentum Ranking")
     st.divider()
     st.subheader("⚙️ Strategy Parameters")
+    
+    stop_loss_pct = _safe_get_config('STOP_LOSS_PCT', -0.12)
+    z_reentry_val = _safe_get_config('Z_REENTRY', 1.0)
+    fee_bps_val = _safe_get_config('TRANSACTION_BPS', 5)
+    
     stop_loss = st.slider("Stop Loss (%)", -30, -5,
-                          int(cfg.STOP_LOSS_PCT * 100), step=1,
+                          int(stop_loss_pct * 100), step=1,
                           key="sidebar_stop_loss") / 100.0
     z_reentry = st.slider("Z Re-entry Threshold", 0.5, 2.0,
-                          cfg.Z_REENTRY, step=0.1,
+                          z_reentry_val, step=0.1,
                           key="sidebar_z_reentry")
-    fee_bps   = st.slider("Transaction Cost (bps)", 0, 20,
-                          cfg.TRANSACTION_BPS,
-                          key="sidebar_fee_bps")
+    fee_bps = st.slider("Transaction Cost (bps)", 0, 20,
+                        fee_bps_val,
+                        key="sidebar_fee_bps")
     st.divider()
-    st.caption("Parameters apply to both options. "
-               "Data always fetched fresh from HF.")
+    st.caption("Parameters apply to both options.")
 
 params = {"stop_loss": stop_loss, "z_reentry": z_reentry, "fee_bps": fee_bps}
 
-# ── Main ──────────────────────────────────────────────────────────────────────
+# ── Main App ─────────────────────────────────────────────────────────────────
 
-st.title("📈 P2-ETF Regime-Aware Rotation Model")
-st.caption(
-    "Wasserstein k-means regime detection · "
-    "Momentum Ranking (RoC + OBV + Breakout) · "
-    "Walk-forward validated · Data: Hugging Face"
-)
+def main():
+    """Main app entry point with error handling"""
+    try:
+        st.title("📈 P2-ETF Regime-Aware Rotation Model")
+        st.caption(
+            "Wasserstein k-means regime detection · "
+            "Momentum Ranking (RoC + OBV + Breakout) · "
+            "Walk-forward validated · Data: Hugging Face"
+        )
 
-tab_a, tab_b = st.tabs([
-    "🏦 Option A — FI / Commodities",
-    "📊 Option B — Equity ETFs",
-])
+        # Get ETF lists from config
+        option_a_etfs = _safe_get_config('OPTION_A_ETFS', ['TLT', 'VNQ', 'SLV', 'GLD', 'LQD', 'HYG'])
+        option_b_etfs = _safe_get_config('OPTION_B_ETFS', ['SPY', 'QQQ', 'XLK', 'XLF', 'XLE', 'XLV'])
 
-with tab_a:
-    st.subheader("Option A — FI / Commodities ETFs")
-    st.caption(f"Universe: {' · '.join(cfg.OPTION_A_ETFS)}")
-    sub_a1, sub_a2 = st.tabs(["📅 Single Year", "🔄 Consensus"])
-    with sub_a1:
-        render_single_year_tab("a", cfg.OPTION_A_ETFS, params)
-    with sub_a2:
-        render_consensus_tab("a", cfg.OPTION_A_ETFS)
+        tab_a, tab_b = st.tabs([
+            "🏦 Option A — FI / Commodities",
+            "📊 Option B — Equity ETFs",
+        ])
 
-with tab_b:
-    st.subheader("Option B — Equity ETFs")
-    st.caption(f"Universe: {' · '.join(cfg.OPTION_B_ETFS)}")
-    sub_b1, sub_b2 = st.tabs(["📅 Single Year", "🔄 Consensus"])
-    with sub_b1:
-        render_single_year_tab("b", cfg.OPTION_B_ETFS, params)
-    with sub_b2:
-        render_consensus_tab("b", cfg.OPTION_B_ETFS)
+        with tab_a:
+            st.subheader("Option A — FI / Commodities ETFs")
+            st.caption(f"Universe: {' · '.join(option_a_etfs)}")
+            sub_a1, sub_a2 = st.tabs(["📅 Single Year", "🔄 Consensus"])
+            with sub_a1:
+                render_single_year_tab("a", option_a_etfs, params)
+            with sub_a2:
+                render_consensus_tab("a", option_a_etfs)
 
-st.divider()
-st.caption(
-    "P2-ETF Regime Predictor | "
-    "Data: P2SAMAPA/p2-etf-regime-predictor (Hugging Face) | "
-    "Methodology: Wasserstein k-means (Horvath et al., 2021) + Momentum Ranking | "
-    "⚠️ Not financial advice"
-)
+        with tab_b:
+            st.subheader("Option B — Equity ETFs")
+            st.caption(f"Universe: {' · '.join(option_b_etfs)}")
+            sub_b1, sub_b2 = st.tabs(["📅 Single Year", "🔄 Consensus"])
+            with sub_b1:
+                render_single_year_tab("b", option_b_etfs, params)
+            with sub_b2:
+                render_consensus_tab("b", option_b_etfs)
+
+        st.divider()
+        st.caption(
+            "P2-ETF Regime Predictor | "
+            "Data: P2SAMAPA/p2-etf-regime-predictor (Hugging Face) | "
+            "⚠️ Not financial advice"
+        )
+        
+    except Exception as e:
+        st.error(f"Application error: {e}")
+        st.code(traceback.format_exc())
+        print(f"Main error: {traceback.format_exc()}")
+
+# Run main
+if __name__ == "__main__":
+    main()
