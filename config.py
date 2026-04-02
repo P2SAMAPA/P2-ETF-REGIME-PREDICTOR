@@ -86,9 +86,9 @@ Z_REENTRY        = 1.0
 TRANSACTION_BPS  = 5
 RISK_FREE_RATE   = 0.045   # 4.5% annual fallback
 
-# ── Fixed test period (for all windows) ──────────────────────────────────────
+# ── Fixed test period (dynamic end) ──────────────────────────────────────────
 TEST_START = "2025-01-01"
-TEST_END   = "2026-03-31"   # will be updated automatically in daily runs if needed
+TEST_END   = None          # Will be interpreted as "up to the latest available date"
 
 # ── Shrinking‑window definition (train_start varies, train_end fixed) ───────
 # Windows are generated from 2008 to 2024 (inclusive) in yearly steps.
@@ -99,8 +99,8 @@ for start_year in range(2008, 2025):          # 2008..2024
         "train_start": f"{start_year}-01-01",
         "train_end": "2024-12-31",
         "test_start": TEST_START,
-        "test_end":   TEST_END,
-        "description": f"train {start_year}-2024, test {TEST_START} to {TEST_END}"
+        "test_end":   TEST_END,                # will be replaced by max date at runtime
+        "description": f"train {start_year}-2024, test from {TEST_START} to latest"
     })
 
 # ── Sweep years for consensus (legacy, kept for compatibility) ───────────────
