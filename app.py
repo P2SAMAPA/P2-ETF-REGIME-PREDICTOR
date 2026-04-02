@@ -89,6 +89,25 @@ def _etf_colour(etf: str) -> str:
     return cfg.ETF_COLORS.get(etf, "#888888")
 
 
+def _extract_prediction_columns(pred_df: pd.DataFrame, target_etfs: list) -> pd.DataFrame:
+    """
+    Extract probability columns (ending with '_P') from predictions DataFrame
+    and rename them to the ETF ticker. Returns a DataFrame with columns = target_etfs
+    that exist, and drops any missing ones.
+    """
+    available = {}
+    for etf in target_etfs:
+        col_candidates = [c for c in pred_df.columns if c.startswith(f"{etf}_") and c.endswith("_P")]
+        if col_candidates:
+            # Take the first matching column (usually the probability of beating cash)
+            available[etf] = col_candidates[0]
+    if not available:
+        return pd.DataFrame()
+    result = pred_df[list(available.values())].copy()
+    result.columns = list(available.keys())
+    return result
+
+
 # ── Cached loaders (ttl=0: always fresh) ─────────────────────────────────────
 
 @st.cache_resource(ttl=0)
@@ -437,21 +456,23 @@ def render_single_year_tab(option: str, target_etfs: list, params: dict):
             st.warning("No in-sample predictions found. Run the daily pipeline first.")
             return
 
-        ytd_preds = insample.loc[f"{current_year}-01-01":]
-        if ytd_preds.empty:
+        ytd_preds_raw = insample.loc[f"{current_year}-01-01":]
+        if ytd_preds_raw.empty:
             st.warning(f"No predictions found for {current_year} yet.")
             return
 
-        # Ensure we only have columns that are in target_etfs
-        # and also exist in the predictions
-        available_etfs = [etf for etf in target_etfs if etf in ytd_preds.columns]
-        if not available_etfs:
-            st.error(f"None of the target ETFs {target_etfs} found in predictions. Available columns: {list(ytd_preds.columns)}")
+        # Extract probability columns and rename to ETF tickers
+        ytd_preds = _extract_prediction_columns(ytd_preds_raw, target_etfs)
+        if ytd_preds.empty:
+            st.error(f"Could not find prediction columns for any of {target_etfs}. "
+                     f"Available columns: {list(ytd_preds_raw.columns)}")
             return
+
+        # Keep only ETFs that have predictions
+        available_etfs = list(ytd_preds.columns)
         if len(available_etfs) < len(target_etfs):
             missing = set(target_etfs) - set(available_etfs)
             st.warning(f"Missing predictions for: {', '.join(missing)}. Using only available ETFs: {available_etfs}")
-        ytd_preds = ytd_preds[available_etfs]
 
         st.info(
             f"**{ytd_label}** — {len(ytd_preds)} trading days "
@@ -475,14 +496,14 @@ def render_single_year_tab(option: str, target_etfs: list, params: dict):
     year = int(selected)
 
     # Extract all predictions for that year
-    year_preds = wf_preds.loc[f"{year}-01-01":f"{year}-12-31"]
-    if year_preds.empty:
+    year_preds_raw = wf_preds.loc[f"{year}-01-01":f"{year}-12-31"]
+    if year_preds_raw.empty:
         st.warning(f"No walk-forward predictions found for {year}.")
         return
 
     # Determine available training start years in this data
-    if "train_start" in year_preds.columns:
-        train_starts = sorted(year_preds["train_start"].unique())
+    if "train_start" in year_preds_raw.columns:
+        train_starts = sorted(year_preds_raw["train_start"].unique())
     else:
         train_starts = ["default"]
 
@@ -495,28 +516,25 @@ def render_single_year_tab(option: str, target_etfs: list, params: dict):
             key=f"train_start_select_{option}_{year}",
         )
         # Filter predictions to that train_start
-        year_preds = year_preds[year_preds["train_start"] == selected_start]
+        year_preds_raw = year_preds_raw[year_preds_raw["train_start"] == selected_start]
     else:
         selected_start = train_starts[0]
 
-    if year_preds.empty:
+    if year_preds_raw.empty:
         st.warning(f"No predictions for year {year} with train_start {selected_start}.")
         return
 
-    # Remove the train_start column from the predictions used in strategy
-    # because the strategy expects only the ETF prediction columns.
-    pred_df = year_preds.drop(columns=[c for c in year_preds.columns
-                                        if c not in target_etfs],
-                              errors='ignore')
-    # Ensure we only have target_etfs columns that actually exist in pred_df
-    available_etfs = [etf for etf in target_etfs if etf in pred_df.columns]
-    if not available_etfs:
-        st.error(f"None of the target ETFs {target_etfs} found in predictions for year {year}. Available columns: {list(pred_df.columns)}")
+    # Extract probability columns and rename to ETF tickers
+    pred_df = _extract_prediction_columns(year_preds_raw, target_etfs)
+    if pred_df.empty:
+        st.error(f"Could not find prediction columns for any of {target_etfs} in year {year}. "
+                 f"Available columns: {list(year_preds_raw.columns)}")
         return
+
+    available_etfs = list(pred_df.columns)
     if len(available_etfs) < len(target_etfs):
         missing = set(target_etfs) - set(available_etfs)
         st.warning(f"Missing predictions for: {', '.join(missing)}. Using only available ETFs: {available_etfs}")
-    pred_df = pred_df[available_etfs]
 
     st.success(
         f"Walk-forward OOS — {year} — Training start: {selected_start} — "
