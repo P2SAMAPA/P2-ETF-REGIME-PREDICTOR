@@ -9,6 +9,7 @@ Structure:
 
 Single Year tab:
   - Historical years (2011–2025): walk-forward OOS predictions
+    For each year, you can select which training start window to view.
   - 2026 YTD: in-sample predictions from mom_pred_history.parquet
 
 All Streamlit widgets have unique keys namespaced by option.
@@ -377,19 +378,33 @@ def _render_results(result: dict, target_etfs: list, option: str,
 def render_single_year_tab(option: str, target_etfs: list, params: dict):
     """
     Single Year tab:
-      - 2011–2025: walk-forward OOS predictions (genuine out-of-sample)
+      - Historical years (2011–2025): walk-forward OOS predictions
+        Each year may have multiple windows (different train_start).
+        The user can select which window to view.
       - 2026 YTD:  in-sample predictions from mom_pred_history.parquet
                    sliced to Jan 2026 onwards (live monitoring view)
     """
     current_year = datetime.now().year  # 2026
     ytd_label    = f"{current_year} YTD (Live)"
 
-    available_years = [int(w["test_year"]) for w in cfg.WINDOWS]
-    year_options    = [str(y) for y in available_years] + [ytd_label]
+    # For historical years, we'll compute available years from the WF data
+    wf_preds = _load_wf_preds(option)
+    if wf_preds.empty:
+        st.warning("No walk-forward predictions found. Run the daily pipeline first.")
+        return
+
+    # Determine available test years from the WF predictions index
+    available_years = sorted(set(wf_preds.index.year))
+    # Filter to years that are in the original WINDOWS (or any year present)
+    # Also include 2025 if present, etc.
+    # We'll just show all years present.
+    # For UI, we want to separate historical (<=2025) from YTD
+    historical_years = [y for y in available_years if y <= 2025]
+    year_options     = [str(y) for y in historical_years] + [ytd_label]
 
     st.caption(
-        "Historical years (2011–2025) show genuine walk-forward out-of-sample results — "
-        f"the model was trained on data before the test year only. "
+        "Historical years show genuine walk-forward out-of-sample results — "
+        "the model was trained on data before the test year only. "
         f"**{ytd_label}** shows live in-sample predictions from {current_year} onwards."
     )
 
@@ -449,33 +464,56 @@ def render_single_year_tab(option: str, target_etfs: list, params: dict):
     # ── Historical year — use walk-forward OOS predictions ────────────────────
     year = int(selected)
 
-    with st.spinner("Loading walk-forward predictions from Hugging Face..."):
-        wf_preds = _load_wf_preds(option)
-
-    if wf_preds.empty:
-        st.warning("No walk-forward predictions found. "
-                   "Run the daily pipeline or manual retrain first.")
+    # Extract all predictions for that year
+    year_preds = wf_preds.loc[f"{year}-01-01":f"{year}-12-31"]
+    if year_preds.empty:
+        st.warning(f"No walk-forward predictions found for {year}.")
         return
 
-    wf_year = wf_preds.loc[f"{year}-01-01":f"{year}-12-31"]
-    if wf_year.empty:
-        st.warning(f"No walk-forward predictions found for {year}. "
-                   "This fold may not have been computed yet.")
+    # Determine available training start years in this data
+    if "train_start" in year_preds.columns:
+        train_starts = sorted(year_preds["train_start"].unique())
+    else:
+        train_starts = ["default"]
+
+    # Let user select which training start window to view
+    if len(train_starts) > 1:
+        selected_start = st.selectbox(
+            f"Training start year (window)",
+            options=train_starts,
+            index=len(train_starts)-1,  # default to most recent
+            key=f"train_start_select_{option}_{year}",
+        )
+        # Filter predictions to that train_start
+        year_preds = year_preds[year_preds["train_start"] == selected_start]
+    else:
+        selected_start = train_starts[0]
+
+    if year_preds.empty:
+        st.warning(f"No predictions for year {year} with train_start {selected_start}.")
         return
+
+    # Remove the train_start column from the predictions used in strategy
+    # because the strategy expects only the ETF prediction columns.
+    pred_df = year_preds.drop(columns=[c for c in year_preds.columns
+                                        if c not in target_etfs],
+                              errors='ignore')
+    # Ensure we only have target_etfs columns
+    pred_df = pred_df[target_etfs]
 
     st.success(
-        f"Walk-forward OOS — {year} — {len(wf_year)} trading days "
-        f"({wf_year.index[0].date()} → {wf_year.index[-1].date()}). "
+        f"Walk-forward OOS — {year} — Training start: {selected_start} — "
+        f"{len(pred_df)} trading days ({pred_df.index[0].date()} → {pred_df.index[-1].date()}). "
         "Model trained on data before this year only."
     )
     st.divider()
 
-    result = run_strategy(wf_year, df, target_etfs, params)
+    result = run_strategy(pred_df, df, target_etfs, params)
     if not result:
         return
 
     _render_results(result, target_etfs, option,
-                    suffix=f"sy_{year}",
+                    suffix=f"sy_{year}_{selected_start}",
                     banner_label=f"Year-End {year}")
 
 
