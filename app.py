@@ -29,14 +29,9 @@ import pickle
 
 import config as cfg
 
-# Import other modules (these should not cause circular imports)
-try:
-    from regime_detection import RegimeDetector
-    from models import MomentumRanker
-    from strategy import execute_strategy, calculate_metrics
-except ImportError as e:
-    st.error(f"Failed to import local modules: {e}")
-    sys.exit(1)
+# No local imports at top level to avoid circular imports.
+# All local modules (data_manager_hf, regime_detection, models, strategy)
+# will be imported inside the functions that need them.
 
 # ── Environment ───────────────────────────────────────────────────────────────
 HF_TOKEN    = os.environ.get("HF_TOKEN", cfg.HF_TOKEN)
@@ -102,12 +97,13 @@ def _extract_prediction_columns(pred_df: pd.DataFrame, target_etfs: list) -> pd.
     return result
 
 
-# ── Cached loaders (using local imports to avoid circular issues) ─────────────
+# ── Cached loaders (import inside functions to avoid circular imports) ─────────
 
 @st.cache_resource(ttl=0)
 def _load_detector(option: str):
     try:
         import data_manager_hf as dm
+        from regime_detection import RegimeDetector
         b = dm.load_detector(option)
         return RegimeDetector.from_bytes(b) if b else None
     except Exception:
@@ -140,10 +136,13 @@ def _load_sweep(option: str) -> tuple:
     return dm.load_sweep_results(option)
 
 
-# ── Strategy runner ───────────────────────────────────────────────────────────
+# ── Strategy runner (import inside) ───────────────────────────────────────────
 
 def run_strategy(pred_df: pd.DataFrame, df: pd.DataFrame,
                  target_etfs: list, params: dict) -> dict:
+    from strategy import execute_strategy, calculate_metrics
+    import config as cfg
+
     common = pred_df.index.intersection(df.index)
     if len(common) < 5:
         return {}
