@@ -8,9 +8,9 @@ Structure:
   Option B — Equity ETFs            → Single Year | Consensus
 
 Single Year tab:
-  - Historical years (2011–2025): walk-forward OOS predictions
-    For each year, you can select which training start window to view.
-  - 2026 YTD: in-sample predictions from mom_pred_history.parquet
+  - Shows walk-forward out-of-sample predictions for the fixed test period (2025–2026 YTD)
+  - User selects the training start year (2008–2024) – each window trains from that year to 2024-12-31
+  - Results reflect genuine OOS performance for the selected training window
 
 All Streamlit widgets have unique keys namespaced by option.
 """
@@ -392,47 +392,74 @@ def _render_results(result: dict, target_etfs: list, option: str,
                      option=option, suffix=suffix)
 
 
-# ── Single-Year sub-tab ───────────────────────────────────────────────────────
+# ── Single-Year sub-tab (fixed test period, multiple training windows) ────────
 
 def render_single_year_tab(option: str, target_etfs: list, params: dict):
     """
     Single Year tab:
-      - Historical years (2011–2025): walk-forward OOS predictions
-        Each year may have multiple windows (different train_start).
-        The user can select which window to view.
-      - 2026 YTD:  in-sample predictions from mom_pred_history.parquet
-                   sliced to Jan 2026 onwards (live monitoring view)
+      - Fixed test period: 2025-01-01 to latest available date (currently 2026 YTD)
+      - For each training window (2008-2024, 2009-2024, ..., 2024-2024) we have walk‑forward predictions.
+      - User selects the training start year (window) and sees the OOS performance.
     """
-    current_year = datetime.now().year  # 2026
-    ytd_label    = f"{current_year} YTD (Live)"
+    current_year = datetime.now().year
+    test_start = "2025-01-01"
 
-    # For historical years, we'll compute available years from the WF data
-    wf_preds = _load_wf_preds(option)
+    with st.spinner("Loading walk‑forward predictions from Hugging Face..."):
+        wf_preds = _load_wf_preds(option)
+
     if wf_preds.empty:
-        st.warning("No walk-forward predictions found. Run the daily pipeline first.")
+        st.warning("No walk‑forward predictions found. Run the daily pipeline first.")
         return
 
-    # Determine available test years from the WF predictions index
-    available_years = sorted(set(wf_preds.index.year))
-    # Filter to years that are in the original WINDOWS (or any year present)
-    # We'll just show all years present.
-    # For UI, we want to separate historical (<=2025) from YTD
-    historical_years = [y for y in available_years if y <= 2025]
-    year_options     = [str(y) for y in historical_years] + [ytd_label]
+    # Check for train_start column (should exist if the pipeline saved it)
+    if "train_start" not in wf_preds.columns:
+        st.error("Walk‑forward predictions missing 'train_start' column. Cannot display multiple training windows.")
+        return
+
+    # Get all unique training start years from the data (e.g., 2008, 2009, ..., 2024)
+    train_start_years = sorted(wf_preds["train_start"].unique())
+    if not train_start_years:
+        st.warning("No training start years found in the predictions.")
+        return
+
+    # Ensure we only show years from 2008 up to 2024 (config may have more)
+    train_start_years = [y for y in train_start_years if 2008 <= y <= 2024]
 
     st.caption(
-        "Historical years show genuine walk-forward out-of-sample results — "
-        "the model was trained on data before the test year only. "
-        f"**{ytd_label}** shows live in-sample predictions from {current_year} onwards."
+        f"Fixed test period: **{test_start} to latest** ({current_year} YTD). "
+        "For each training start year, the model was trained on data from that year through 2024‑12‑31, "
+        "then tested on the period above (out‑of‑sample). Select a training window below to see its results."
     )
 
-    selected = st.selectbox(
-        "Select year",
-        options=year_options,
-        index=len(year_options) - 1,   # default to YTD
-        key=f"year_select_{option}",
+    selected_train_start = st.selectbox(
+        "Training start year (shrinking window)",
+        options=train_start_years,
+        index=len(train_start_years) - 1,   # default to most recent (2024)
+        key=f"train_start_select_{option}",
     )
 
+    # Filter predictions for the selected training window and the test period
+    window_preds_raw = wf_preds[
+        (wf_preds["train_start"] == selected_train_start) &
+        (wf_preds.index >= test_start)
+    ]
+    if window_preds_raw.empty:
+        st.warning(f"No predictions found for training start year {selected_train_start} in test period {test_start} onwards.")
+        return
+
+    # Extract probability columns and rename to ETF tickers
+    pred_df = _extract_prediction_columns(window_preds_raw, target_etfs)
+    if pred_df.empty:
+        st.error(f"Could not find prediction columns for any of {target_etfs}. "
+                 f"Available columns: {list(window_preds_raw.columns)}")
+        return
+
+    available_etfs = list(pred_df.columns)
+    if len(available_etfs) < len(target_etfs):
+        missing = set(target_etfs) - set(available_etfs)
+        st.warning(f"Missing predictions for: {', '.join(missing)}. Using only available ETFs: {available_etfs}")
+
+    # Load full dataset (including regimes and returns)
     with st.spinner("Loading dataset from Hugging Face..."):
         df = _load_dataset(option, cfg.START_YEAR_DEFAULT)
 
@@ -447,99 +474,10 @@ def render_single_year_tab(option: str, target_etfs: list, params: dict):
         except Exception:
             pass
 
-    # ── 2026 YTD — use in-sample predictions ──────────────────────────────────
-    if selected == ytd_label:
-        with st.spinner("Loading in-sample predictions from Hugging Face..."):
-            insample = _load_insample_preds(option)
-
-        if insample.empty:
-            st.warning("No in-sample predictions found. Run the daily pipeline first.")
-            return
-
-        ytd_preds_raw = insample.loc[f"{current_year}-01-01":]
-        if ytd_preds_raw.empty:
-            st.warning(f"No predictions found for {current_year} yet.")
-            return
-
-        # Extract probability columns and rename to ETF tickers
-        ytd_preds = _extract_prediction_columns(ytd_preds_raw, target_etfs)
-        if ytd_preds.empty:
-            st.error(f"Could not find prediction columns for any of {target_etfs}. "
-                     f"Available columns: {list(ytd_preds_raw.columns)}")
-            return
-
-        # Keep only ETFs that have predictions
-        available_etfs = list(ytd_preds.columns)
-        if len(available_etfs) < len(target_etfs):
-            missing = set(target_etfs) - set(available_etfs)
-            st.warning(f"Missing predictions for: {', '.join(missing)}. Using only available ETFs: {available_etfs}")
-
-        st.info(
-            f"**{ytd_label}** — {len(ytd_preds)} trading days "
-            f"({ytd_preds.index[0].date()} → {ytd_preds.index[-1].date()}). "
-            "These are **in-sample** predictions — the model has seen this data.",
-            icon="ℹ️",
-        )
-
-        result = run_strategy(ytd_preds, df, available_etfs, params)
-        if not result:
-            return
-
-        st.success(f"{ytd_label} — {len(ytd_preds)} trading days")
-        st.divider()
-        _render_results(result, available_etfs, option,
-                        suffix=f"ytd_{current_year}",
-                        banner_label=f"Latest Signal — {result['pred_bt'].index[-1].strftime('%b %d, %Y')}")
-        return
-
-    # ── Historical year — use walk-forward OOS predictions ────────────────────
-    year = int(selected)
-
-    # Extract all predictions for that year
-    year_preds_raw = wf_preds.loc[f"{year}-01-01":f"{year}-12-31"]
-    if year_preds_raw.empty:
-        st.warning(f"No walk-forward predictions found for {year}.")
-        return
-
-    # Determine available training start years in this data
-    if "train_start" in year_preds_raw.columns:
-        train_starts = sorted(year_preds_raw["train_start"].unique())
-    else:
-        train_starts = ["default"]
-
-    # Let user select which training start window to view
-    if len(train_starts) > 1:
-        selected_start = st.selectbox(
-            f"Training start year (window)",
-            options=train_starts,
-            index=len(train_starts)-1,  # default to most recent
-            key=f"train_start_select_{option}_{year}",
-        )
-        # Filter predictions to that train_start
-        year_preds_raw = year_preds_raw[year_preds_raw["train_start"] == selected_start]
-    else:
-        selected_start = train_starts[0]
-
-    if year_preds_raw.empty:
-        st.warning(f"No predictions for year {year} with train_start {selected_start}.")
-        return
-
-    # Extract probability columns and rename to ETF tickers
-    pred_df = _extract_prediction_columns(year_preds_raw, target_etfs)
-    if pred_df.empty:
-        st.error(f"Could not find prediction columns for any of {target_etfs} in year {year}. "
-                 f"Available columns: {list(year_preds_raw.columns)}")
-        return
-
-    available_etfs = list(pred_df.columns)
-    if len(available_etfs) < len(target_etfs):
-        missing = set(target_etfs) - set(available_etfs)
-        st.warning(f"Missing predictions for: {', '.join(missing)}. Using only available ETFs: {available_etfs}")
-
     st.success(
-        f"Walk-forward OOS — {year} — Training start: {selected_start} — "
-        f"{len(pred_df)} trading days ({pred_df.index[0].date()} → {pred_df.index[-1].date()}). "
-        "Model trained on data before this year only."
+        f"Training window: **{selected_train_start} – 2024-12-31** | "
+        f"Test period: **{pred_df.index[0].date()} → {pred_df.index[-1].date()}** "
+        f"({len(pred_df)} trading days) — Walk‑forward OOS"
     )
     st.divider()
 
@@ -547,9 +485,13 @@ def render_single_year_tab(option: str, target_etfs: list, params: dict):
     if not result:
         return
 
-    _render_results(result, available_etfs, option,
-                    suffix=f"sy_{year}_{selected_start}",
-                    banner_label=f"Year-End {year}")
+    _render_results(
+        result,
+        available_etfs,
+        option,
+        suffix=f"train_{selected_train_start}",
+        banner_label=f"Test period end: {result['pred_bt'].index[-1].strftime('%b %d, %Y')}"
+    )
 
 
 # ── Consensus sub-tab ─────────────────────────────────────────────────────────
