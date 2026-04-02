@@ -8,9 +8,9 @@ Structure:
   Option B — Equity ETFs            → Single Year | Consensus
 
 Single Year tab:
-  - Shows walk-forward out-of-sample predictions for the fixed test period (2025–2026 YTD)
-  - User selects the training start year (2008–2024) – each window trains from that year to 2024-12-31
-  - Results reflect genuine OOS performance for the selected training window
+  - Fixed test period: 2025-01-01 to latest (2026 YTD)
+  - Dropdown shows training start years (2008–2024) from the 'train_start' column.
+  - Displays walk-forward out-of-sample results for the selected training window.
 
 All Streamlit widgets have unique keys namespaced by option.
 """
@@ -99,7 +99,6 @@ def _extract_prediction_columns(pred_df: pd.DataFrame, target_etfs: list) -> pd.
     for etf in target_etfs:
         col_candidates = [c for c in pred_df.columns if c.startswith(f"{etf}_") and c.endswith("_P")]
         if col_candidates:
-            # Take the first matching column (usually the probability of beating cash)
             available[etf] = col_candidates[0]
     if not available:
         return pd.DataFrame()
@@ -397,12 +396,12 @@ def _render_results(result: dict, target_etfs: list, option: str,
 def render_single_year_tab(option: str, target_etfs: list, params: dict):
     """
     Single Year tab:
-      - Fixed test period: 2025-01-01 to latest available date (currently 2026 YTD)
-      - For each training window (2008-2024, 2009-2024, ..., 2024-2024) we have walk‑forward predictions.
-      - User selects the training start year (window) and sees the OOS performance.
+      - Fixed test period: 2025-01-01 to latest available date (2026 YTD)
+      - Dropdown shows training start years (2008–2024) from the 'train_start' column.
+      - Displays walk-forward out-of-sample results for the selected training window.
     """
-    current_year = datetime.now().year
     test_start = "2025-01-01"
+    current_year = datetime.now().year
 
     with st.spinner("Loading walk‑forward predictions from Hugging Face..."):
         wf_preds = _load_wf_preds(option)
@@ -411,23 +410,41 @@ def render_single_year_tab(option: str, target_etfs: list, params: dict):
         st.warning("No walk‑forward predictions found. Run the daily pipeline first.")
         return
 
-    # Check for train_start column (should exist if the pipeline saved it)
+    # ── DIAGNOSTIC BLOCK (shows what's in the data) ──────────────────────────
+    with st.expander("🔧 Debug info (train_start column)"):
+        col_info = f"Columns: {list(wf_preds.columns)}"
+        st.code(col_info)
+        if "train_start" in wf_preds.columns:
+            train_vals = sorted(wf_preds["train_start"].unique())
+            st.write(f"✅ 'train_start' column exists. Unique values: {train_vals}")
+            # Also show a sample of rows with date range
+            st.write(f"Date range of predictions: {wf_preds.index.min()} → {wf_preds.index.max()}")
+            sample_rows = wf_preds[["train_start"]].head(3)
+            st.dataframe(sample_rows)
+        else:
+            st.error("❌ 'train_start' column is MISSING from the predictions file.")
+            st.write("This means the pipeline saved predictions without the train_start column. "
+                     "Please re-run training with the latest `train_hf.py` (which adds this column).")
+    # ── END DIAGNOSTIC BLOCK ──────────────────────────────────────────────────
+
+    # Ensure we have a train_start column
     if "train_start" not in wf_preds.columns:
-        st.error("Walk‑forward predictions missing 'train_start' column. Cannot display multiple training windows.")
+        st.error("Cannot display training windows because 'train_start' column is missing. "
+                 "Please retrain all windows using the updated pipeline.")
         return
 
-    # Get all unique training start years from the data (e.g., 2008, 2009, ..., 2024)
+    # Get unique training start years (e.g., 2008, 2009, ..., 2024)
     train_start_years = sorted(wf_preds["train_start"].unique())
-    if not train_start_years:
-        st.warning("No training start years found in the predictions.")
-        return
-
-    # Ensure we only show years from 2008 up to 2024 (config may have more)
+    # Filter to years between 2008 and 2024 (should be exactly those)
     train_start_years = [y for y in train_start_years if 2008 <= y <= 2024]
+
+    if not train_start_years:
+        st.warning("No training start years found in the range 2008–2024.")
+        return
 
     st.caption(
         f"Fixed test period: **{test_start} to latest** ({current_year} YTD). "
-        "For each training start year, the model was trained on data from that year through 2024‑12‑31, "
+        "For each training start year, the model was trained from that year through 2024‑12‑31, "
         "then tested on the period above (out‑of‑sample). Select a training window below to see its results."
     )
 
