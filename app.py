@@ -322,11 +322,11 @@ def show_audit_trail(audit_trail: list, target_etfs: list,
               .set_properties(**{"text-align": "center"})
               .hide(axis="index"))
     if signal_cols:
-        styled = styled.applymap(_style_signal, subset=signal_cols)
+        styled = styled.map(_style_signal, subset=signal_cols)
     if regime_cols:
-        styled = styled.applymap(_style_regime, subset=regime_cols)
+        styled = styled.map(_style_regime, subset=regime_cols)
     if ret_cols:
-        styled = styled.applymap(_style_ret, subset=ret_cols)
+        styled = styled.map(_style_ret, subset=ret_cols)
 
     st.dataframe(styled, use_container_width=True,
                  key=f"audit_trail_{option}_{suffix}")
@@ -763,8 +763,8 @@ def render_consensus_tab(option: str, target_etfs: list):
 
     st.dataframe(
         tdf.style
-        .applymap(_ss, subset=["Signal"])
-        .applymap(_sr, subset=["Ann. Return"])
+        .map(_ss, subset=["Signal"])
+        .map(_sr, subset=["Ann. Return"])
         .set_properties(**{"text-align": "center"})
         .hide(axis="index"),
         use_container_width=True,
