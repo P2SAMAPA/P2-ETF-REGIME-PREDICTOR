@@ -1,10 +1,12 @@
 """
-app.py — P2-ETF-REGIME-PREDICTOR v2.2 (Circular Import Fixed)
-==============================================================
-All local module imports are deferred to function level to prevent
-circular import issues with data_manager_hf.
-
-
+app.py — P2-ETF-REGIME-PREDICTOR v2.3 (Page Config Fix)
+========================================================
+Key fixes vs v2.2:
+  1. st.set_page_config() is now the VERY FIRST Streamlit call — before all
+     env-var checks, config imports, and st.error()/st.stop() calls.
+  2. Sidebar widgets moved INSIDE main() so they never execute at module level
+     before the page is configured.
+  3. config import error handling updated to call set_page_config first.
 """
 
 import os
@@ -20,6 +22,14 @@ from datetime import datetime, timedelta
 import pytz
 import pickle
 
+# ── MUST BE FIRST: Page Config ────────────────────────────────────────────────
+st.set_page_config(
+    page_title="P2-ETF Regime Predictor",
+    page_icon="📈",
+    layout="wide",
+    initial_sidebar_state="expanded",
+)
+
 # ── Global Error Handler ──────────────────────────────────────────────────────
 def handle_exception(exc_type, exc_value, exc_traceback):
     print("".join(traceback.format_exception(exc_type, exc_value, exc_traceback)))
@@ -34,24 +44,16 @@ except ImportError as e:
     st.error(f"Failed to import config.py: {e}")
     st.stop()
 
-# Environment variables
-HF_TOKEN    = os.environ.get("HF_TOKEN", getattr(cfg, 'HF_TOKEN', ''))
-GH_PAT      = os.environ.get("GH_PAT", getattr(cfg, 'GH_PAT', ''))
+# ── Environment Variables ─────────────────────────────────────────────────────
+HF_TOKEN    = os.environ.get("HF_TOKEN",    getattr(cfg, 'HF_TOKEN',    ''))
+GH_PAT      = os.environ.get("GH_PAT",      getattr(cfg, 'GH_PAT',      ''))
 GITHUB_REPO = os.environ.get("GITHUB_REPO", getattr(cfg, 'GITHUB_REPO', ''))
 
 if not HF_TOKEN:
     st.error("⚠️ HF_TOKEN not found. Please set it in Streamlit Cloud Secrets.")
     st.stop()
 
-# ── Page Config ───────────────────────────────────────────────────────────────
-st.set_page_config(
-    page_title="P2-ETF Regime Predictor",
-    page_icon="📈",
-    layout="wide",
-    initial_sidebar_state="expanded",
-)
-
-# ── Utilities ───────────────────────────────────────────────────────────────
+# ── Utilities ─────────────────────────────────────────────────────────────────
 
 def _today_est():
     return datetime.now(pytz.timezone("US/Eastern")).date()
@@ -89,7 +91,7 @@ def _etf_colour(etf: str) -> str:
 def _extract_prediction_columns(pred_df: pd.DataFrame, target_etfs: list) -> pd.DataFrame:
     if pred_df is None or pred_df.empty:
         return pd.DataFrame()
-    
+
     available = {}
     for etf in target_etfs:
         col_candidates = [c for c in pred_df.columns if c.startswith(f"{etf}_") and c.endswith("_P")]
@@ -97,7 +99,7 @@ def _extract_prediction_columns(pred_df: pd.DataFrame, target_etfs: list) -> pd.
             available[etf] = col_candidates[0]
     if not available:
         return pd.DataFrame()
-    
+
     result = pred_df[list(available.values())].copy()
     result.columns = list(available.keys())
     return result
@@ -107,13 +109,11 @@ def _safe_get_config(attr, default=None):
     return getattr(cfg, attr, default)
 
 
-# ── Cached Loaders (ALL local imports moved INSIDE functions) ────────────────
+# ── Cached Loaders (ALL local imports deferred to prevent circular import) ────
 
 @st.cache_resource(ttl=3600)
 def _load_detector(option: str):
-    """Load regime detector - imports deferred to prevent circular import"""
     try:
-        # LOCAL IMPORT - prevents circular import
         import data_manager_hf as dm
         from regime_detection import RegimeDetector
         b = dm.load_detector(option)
@@ -125,9 +125,7 @@ def _load_detector(option: str):
 
 @st.cache_data(ttl=1800)
 def _load_wf_preds(option: str) -> pd.DataFrame:
-    """Load walk-forward predictions - imports deferred"""
     try:
-        # LOCAL IMPORT - prevents circular import
         import data_manager_hf as dm
         df = dm.load_wf_predictions(option, force_download=False)
         return df if df is not None else pd.DataFrame()
@@ -139,9 +137,7 @@ def _load_wf_preds(option: str) -> pd.DataFrame:
 
 @st.cache_data(ttl=3600)
 def _load_insample_preds(option: str) -> pd.DataFrame:
-    """Load in-sample predictions - imports deferred"""
     try:
-        # LOCAL IMPORT - prevents circular import
         import data_manager_hf as dm
         df = dm.load_predictions(option)
         return df if df is not None else pd.DataFrame()
@@ -152,9 +148,7 @@ def _load_insample_preds(option: str) -> pd.DataFrame:
 
 @st.cache_data(ttl=3600)
 def _load_dataset(option: str, start_year: int) -> pd.DataFrame:
-    """Load dataset - imports deferred"""
     try:
-        # LOCAL IMPORT - prevents circular import
         import data_manager_hf as dm
         return dm.get_data(option=option, start_year=start_year, force_refresh=False)
     except Exception as e:
@@ -165,9 +159,7 @@ def _load_dataset(option: str, start_year: int) -> pd.DataFrame:
 
 @st.cache_data(ttl=1800)
 def _load_sweep(option: str) -> tuple:
-    """Load sweep results - imports deferred"""
     try:
-        # LOCAL IMPORT - prevents circular import
         import data_manager_hf as dm
         return dm.load_sweep_results(option)
     except Exception as e:
@@ -175,18 +167,16 @@ def _load_sweep(option: str) -> tuple:
         return {}, None
 
 
-# ── Strategy Runner ──────────────────────────────────────────────────────────
+# ── Strategy Runner ───────────────────────────────────────────────────────────
 
 def run_strategy(pred_df: pd.DataFrame, df: pd.DataFrame,
                  target_etfs: list, params: dict) -> dict:
-    """Execute trading strategy - imports deferred"""
-    # LOCAL IMPORTS - prevents circular import
     try:
         from strategy import execute_strategy, calculate_metrics
     except ImportError as e:
         st.error(f"Failed to import strategy module: {e}")
         return {}
-    
+
     try:
         common = pred_df.index.intersection(df.index)
         if len(common) < 5:
@@ -195,21 +185,21 @@ def run_strategy(pred_df: pd.DataFrame, df: pd.DataFrame,
 
         pred_bt    = pred_df.loc[common]
         df_bt      = df.loc[common]
-        
-        ret_cols   = [f"{t}_Ret" for t in target_etfs if f"{t}_Ret" in df_bt.columns]
+
+        ret_cols = [f"{t}_Ret" for t in target_etfs if f"{t}_Ret" in df_bt.columns]
         if not ret_cols:
             st.error("No return columns found in dataset.")
             return {}
-            
+
         daily_rets = df_bt[ret_cols]
-        
+
         rf_rate = _safe_get_config('RISK_FREE_RATE', 0.05)
         if "DTB3" in df_bt.columns:
             try:
                 rf_rate = float(df_bt["DTB3"].iloc[-1] / 100)
             except (ValueError, TypeError):
                 pass
-        
+
         regime_series = pd.Series("Unknown", index=df_bt.index)
         if "Regime_Name" in df_bt.columns:
             regime_series = df_bt["Regime_Name"]
@@ -225,9 +215,9 @@ def run_strategy(pred_df: pd.DataFrame, df: pd.DataFrame,
             regime_series=regime_series,
             target_etfs=target_etfs,
         )
-        
+
         metrics = calculate_metrics(strat_rets, rf_rate=rf_rate)
-        
+
         return {
             "strat_rets":       strat_rets,
             "audit_trail":      audit_trail,
@@ -241,14 +231,14 @@ def run_strategy(pred_df: pd.DataFrame, df: pd.DataFrame,
             "rf_rate":          rf_rate,
             "regime_series":    regime_series,
         }
-        
+
     except Exception as e:
         st.error(f"Strategy execution failed: {e}")
         print(f"Strategy error: {traceback.format_exc()}")
         return {}
 
 
-# ── Display Components ───────────────────────────────────────────────────────
+# ── Display Components ────────────────────────────────────────────────────────
 
 def show_hero_banner(next_signal, conviction_label, conviction_z,
                      regime_name, next_date, label=""):
@@ -257,8 +247,9 @@ def show_hero_banner(next_signal, conviction_label, conviction_z,
                   if conviction_label in ("High", "Very High")
                   else "#d97706" if conviction_label == "Moderate"
                   else "#dc2626")
-    date_str = label or (next_date.strftime("%A %b %d, %Y") if hasattr(next_date, 'strftime') else str(next_date))
-    
+    date_str = label or (next_date.strftime("%A %b %d, %Y")
+                         if hasattr(next_date, 'strftime') else str(next_date))
+
     st.markdown(f"""
     <div style="background:white;border-left:6px solid {accent_col};
                 border-radius:12px;padding:18px 24px;margin-bottom:20px;
@@ -295,7 +286,7 @@ def show_prob_bars(last_p: list, target_etfs: list, option: str):
     if n == 0:
         st.info("No ETF data available.")
         return
-        
+
     cols = st.columns(min(n, 6))
     for i, etf in enumerate(target_etfs):
         p_val = last_p[i] if i < len(last_p) else 0.5
@@ -310,10 +301,10 @@ def show_prob_bars(last_p: list, target_etfs: list, option: str):
 
 def show_metrics(metrics: dict, rf_rate: float, option: str):
     st.subheader("📊 Performance Metrics")
-    
+
     ann_return = metrics.get('ann_return', 0) or 0
     excess = ann_return - rf_rate
-    
+
     c1, c2, c3, c4 = st.columns(4)
     c1.metric("Ann. Return",  f"{ann_return*100:.2f}%",
               delta=f"{excess*100:+.1f}pp vs T-Bill")
@@ -325,11 +316,11 @@ def show_metrics(metrics: dict, rf_rate: float, option: str):
 def show_equity_curve(cum_rets: np.ndarray, dates: pd.Index,
                       option: str, suffix: str = ""):
     st.subheader("📈 Equity Curve")
-    
+
     if cum_rets is None or len(cum_rets) == 0:
         st.info("No equity curve data available.")
         return
-        
+
     fig = go.Figure()
     fig.add_trace(go.Scatter(
         x=dates[-len(cum_rets):], y=cum_rets,
@@ -354,10 +345,10 @@ def show_regime_timeline(df_bt: pd.DataFrame, pred_bt: pd.DataFrame,
                          option: str, suffix: str = ""):
     if "Regime_Name" not in df_bt.columns:
         return
-        
+
     st.subheader("🗺️ Regime Timeline")
     regime_df = df_bt[["Regime_Name"]].reindex(pred_bt.index).ffill()
-    
+
     fig = go.Figure()
     for rname in regime_df["Regime_Name"].unique():
         mask = regime_df["Regime_Name"] == rname
@@ -386,7 +377,7 @@ def show_audit_trail(audit_trail: list, target_etfs: list,
     if not audit_trail:
         st.info("No audit trail available.")
         return
-        
+
     audit_df = pd.DataFrame(audit_trail).tail(30)
 
     def _style_signal(val):
@@ -421,7 +412,6 @@ def show_audit_trail(audit_trail: list, target_etfs: list,
             styled = styled.map(_style_regime, subset=regime_cols)
         if ret_cols:
             styled = styled.map(_style_ret, subset=ret_cols)
-
         st.dataframe(styled, use_container_width=True,
                      key=f"audit_trail_{option}_{suffix}")
     except Exception:
@@ -432,9 +422,9 @@ def show_audit_trail(audit_trail: list, target_etfs: list,
 def _check_staleness(pred_bt: pd.DataFrame):
     if pred_bt is None or pred_bt.empty:
         return
-        
+
     try:
-        pred_last = pred_bt.index[-1].date()
+        pred_last  = pred_bt.index[-1].date()
         days_stale = (_today_est() - pred_last).days
         if days_stale > 1:
             st.warning(
@@ -451,13 +441,13 @@ def _render_results(result: dict, target_etfs: list, option: str,
     if not result:
         st.error("No results to display.")
         return
-        
+
     _check_staleness(result.get("pred_bt"))
-    
+
     regime_name = "?"
     if result.get("regime_series") is not None and not result["regime_series"].empty:
         regime_name = result["regime_series"].iloc[-1]
-    
+
     next_date = datetime.now()
     if result.get("pred_bt") is not None and not result["pred_bt"].empty:
         next_date = _next_trading_day(result["pred_bt"].index[-1])
@@ -474,7 +464,7 @@ def _render_results(result: dict, target_etfs: list, option: str,
     st.divider()
     show_metrics(result.get("metrics", {}), result.get("rf_rate", 0.05), option)
     st.divider()
-    
+
     cum_rets = result.get("metrics", {}).get("cum_returns", np.array([1]))
     show_equity_curve(cum_rets, result["pred_bt"].index, option=option, suffix=suffix)
     st.divider()
@@ -483,10 +473,10 @@ def _render_results(result: dict, target_etfs: list, option: str,
     show_audit_trail(result.get("audit_trail", []), target_etfs, option=option, suffix=suffix)
 
 
-# ── Single-Year Tab ──────────────────────────────────────────────────────────
+# ── Single-Year Tab ───────────────────────────────────────────────────────────
 
 def render_single_year_tab(option: str, target_etfs: list, params: dict):
-    test_start = "2025-01-01"
+    test_start   = "2025-01-01"
     current_year = datetime.now().year
 
     with st.spinner("Loading walk‑forward predictions..."):
@@ -501,7 +491,7 @@ def render_single_year_tab(option: str, target_etfs: list, params: dict):
         st.code(f"Columns: {list(wf_preds.columns)}")
         st.write(f"Shape: {wf_preds.shape}")
         st.write(f"Index range: {wf_preds.index.min()} → {wf_preds.index.max()}")
-        
+
         if "train_start" in wf_preds.columns:
             train_vals = sorted(wf_preds["train_start"].unique())
             st.write(f"✅ 'train_start' values: {train_vals}")
@@ -536,7 +526,7 @@ def render_single_year_tab(option: str, target_etfs: list, params: dict):
         (wf_preds["train_start"] == selected_train_start) &
         (wf_preds.index >= test_start)
     ]
-    
+
     if window_preds_raw.empty:
         st.warning(f"No predictions for training start {selected_train_start} in test period.")
         return
@@ -588,7 +578,7 @@ def render_single_year_tab(option: str, target_etfs: list, params: dict):
     )
 
 
-# ── Consensus Tab ───────────────────────────────────────────────────────────
+# ── Consensus Tab ─────────────────────────────────────────────────────────────
 
 def _compute_consensus(sweep_data: dict) -> dict:
     if not sweep_data:
@@ -613,10 +603,10 @@ def _compute_consensus(sweep_data: dict) -> dict:
             "conviction": sig.get("conviction", "?"),
             "regime":     sig.get("regime", "?"),
         })
-    
+
     if not rows:
         return {}
-        
+
     df_c = pd.DataFrame(rows)
 
     def _mm(s):
@@ -651,7 +641,7 @@ def _compute_consensus(sweep_data: dict) -> dict:
             "avg_sharpe": round(float(np.mean(v["sharpes"])), 3),
             "avg_max_dd": round(float(np.mean(v["dds"])), 4),
         }
-    
+
     total = sum(s["cum_score"] for s in summary.values())
     for e in summary:
         summary[e]["score_share"] = (
@@ -688,9 +678,9 @@ def render_consensus_tab(option: str, target_etfs: list):
         return
 
     winner = cons["winner"]
-    wi = cons["etf_summary"][winner]
-    wc = _etf_colour(winner)
-    sp = wi["score_share"] * 100
+    wi     = cons["etf_summary"][winner]
+    wc     = _etf_colour(winner)
+    sp     = wi["score_share"] * 100
     sig_label = ("⚠️ Split Signal" if wi["score_share"] < 0.40 else "✅ Clear Consensus")
 
     st.markdown(f"""
@@ -739,7 +729,7 @@ def render_consensus_tab(option: str, target_etfs: list):
     st.divider()
 
     c1, c2 = st.columns(2)
-    es = cons["etf_summary"]
+    es   = cons["etf_summary"]
     setf = sorted(es.keys(), key=lambda e: -es[e]["cum_score"])
 
     with c1:
@@ -808,7 +798,8 @@ def render_consensus_tab(option: str, target_etfs: list):
     def _sr(val):
         try:
             v = float(str(val).replace("%", ""))
-            return ("color:#00b894;font-weight:600" if v > 0 else "color:#d63031;font-weight:600")
+            return ("color:#00b894;font-weight:600" if v > 0
+                    else "color:#d63031;font-weight:600")
         except Exception:
             return ""
 
@@ -825,37 +816,47 @@ def render_consensus_tab(option: str, target_etfs: list):
                      key=f"consensus_table_{option}")
 
 
-# ── Sidebar ─────────────────────────────────────────────────────────────────
-
-with st.sidebar:
-    st.title("P2-ETF Engine")
-    st.caption("Wasserstein Regime Detection\nMomentum Ranking")
-    st.divider()
-    st.subheader("⚙️ Strategy Parameters")
-    
-    stop_loss_pct = _safe_get_config('STOP_LOSS_PCT', -0.12)
-    z_reentry_val = _safe_get_config('Z_REENTRY', 1.0)
-    fee_bps_val = _safe_get_config('TRANSACTION_BPS', 5)
-    
-    stop_loss = st.slider("Stop Loss (%)", -30, -5,
-                          int(stop_loss_pct * 100), step=1,
-                          key="sidebar_stop_loss") / 100.0
-    z_reentry = st.slider("Z Re-entry Threshold", 0.5, 2.0,
-                          z_reentry_val, step=0.1,
-                          key="sidebar_z_reentry")
-    fee_bps = st.slider("Transaction Cost (bps)", 0, 20,
-                        fee_bps_val,
-                        key="sidebar_fee_bps")
-    st.divider()
-    st.caption("Parameters apply to both options.")
-
-params = {"stop_loss": stop_loss, "z_reentry": z_reentry, "fee_bps": fee_bps}
-
-# ── Main App ─────────────────────────────────────────────────────────────────
+# ── Main App ──────────────────────────────────────────────────────────────────
 
 def main():
-    """Main app entry point with error handling"""
+    """Main app entry point — sidebar lives here to ensure page config runs first."""
     try:
+        # ── Sidebar ───────────────────────────────────────────────────────────
+        with st.sidebar:
+            st.title("P2-ETF Engine")
+            st.caption("Wasserstein Regime Detection\nMomentum Ranking")
+            st.divider()
+            st.subheader("⚙️ Strategy Parameters")
+
+            stop_loss_pct = _safe_get_config('STOP_LOSS_PCT', -0.12)
+            z_reentry_val = _safe_get_config('Z_REENTRY', 1.0)
+            fee_bps_val   = _safe_get_config('TRANSACTION_BPS', 5)
+
+            stop_loss = st.slider(
+                "Stop Loss (%)", -30, -5,
+                int(stop_loss_pct * 100), step=1,
+                key="sidebar_stop_loss",
+            ) / 100.0
+            z_reentry = st.slider(
+                "Z Re-entry Threshold", 0.5, 2.0,
+                z_reentry_val, step=0.1,
+                key="sidebar_z_reentry",
+            )
+            fee_bps = st.slider(
+                "Transaction Cost (bps)", 0, 20,
+                fee_bps_val,
+                key="sidebar_fee_bps",
+            )
+            st.divider()
+            st.caption("Parameters apply to both options.")
+
+        params = {
+            "stop_loss": stop_loss,
+            "z_reentry": z_reentry,
+            "fee_bps":   fee_bps,
+        }
+
+        # ── Main Content ──────────────────────────────────────────────────────
         st.title("📈 P2-ETF Regime-Aware Rotation Model")
         st.caption(
             "Wasserstein k-means regime detection · "
@@ -895,12 +896,13 @@ def main():
             "Data: P2SAMAPA/p2-etf-regime-predictor (Hugging Face) | "
             "⚠️ Not financial advice"
         )
-        
+
     except Exception as e:
         st.error(f"Application error: {e}")
         st.code(traceback.format_exc())
         print(f"Main error: {traceback.format_exc()}")
 
-# Run main
+
+# ── Entry Point ───────────────────────────────────────────────────────────────
 if __name__ == "__main__":
     main()
