@@ -29,13 +29,15 @@ import pickle
 
 import config as cfg
 
+# Import data_manager_hf as a module to avoid circular import issues
 try:
-    from data_manager_hf import (
-        get_data,
-        load_predictions, load_wf_predictions,
-        load_detector, load_ranker,
-        load_signals, load_sweep_results,
-    )
+    import data_manager_hf as dm
+except ImportError as e:
+    st.error(f"Failed to import data_manager_hf: {e}")
+    sys.exit(1)
+
+# Import other modules
+try:
     from regime_detection import RegimeDetector
     from models import MomentumRanker
     from strategy import execute_strategy, calculate_metrics
@@ -112,7 +114,7 @@ def _extract_prediction_columns(pred_df: pd.DataFrame, target_etfs: list) -> pd.
 @st.cache_resource(ttl=0)
 def _load_detector(option: str):
     try:
-        b = load_detector(option)
+        b = dm.load_detector(option)
         return RegimeDetector.from_bytes(b) if b else None
     except Exception:
         return None
@@ -120,24 +122,24 @@ def _load_detector(option: str):
 
 @st.cache_data(ttl=0)
 def _load_wf_preds(option: str) -> pd.DataFrame:
-    df = load_wf_predictions(option, force_download=True)
+    df = dm.load_wf_predictions(option, force_download=True)
     return df if df is not None else pd.DataFrame()
 
 
 @st.cache_data(ttl=0)
 def _load_insample_preds(option: str) -> pd.DataFrame:
-    df = load_predictions(option)
+    df = dm.load_predictions(option)
     return df if df is not None else pd.DataFrame()
 
 
 @st.cache_data(ttl=0)
 def _load_dataset(option: str, start_year: int) -> pd.DataFrame:
-    return get_data(option=option, start_year=start_year, force_refresh=False)
+    return dm.get_data(option=option, start_year=start_year, force_refresh=False)
 
 
 @st.cache_data(ttl=0)
 def _load_sweep(option: str) -> tuple:
-    return load_sweep_results(option)
+    return dm.load_sweep_results(option)
 
 
 # ── Strategy runner ───────────────────────────────────────────────────────────
