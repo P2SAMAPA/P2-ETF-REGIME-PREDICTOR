@@ -1,26 +1,10 @@
 """
-app.py — P2-ETF-REGIME-PREDICTOR v2.1 (Production Fixed)
-===========================================================
-Streamlit UI with stability fixes for Streamlit Cloud deployment.
+app.py — P2-ETF-REGIME-PREDICTOR v2.2 (Circular Import Fixed)
+==============================================================
+All local module imports are deferred to function level to prevent
+circular import issues with data_manager_hf.
 
-Key fixes:
-- Added Python version compatibility checks
-- Fixed cache settings (TTL=0 causes reload loops)
-- Added force_download=False to prevent HF timeouts
-- Added comprehensive error boundaries
-- Added global exception handler for debugging
 
---------
-Streamlit UI.
-
-Structure:
-  Option A — FI / Commodities ETFs  → Single Year | Consensus
-  Option B — Equity ETFs            → Single Year | Consensus
-
-Single Year tab:
-  - Fixed test period: 2025-01-01 to latest (2026 YTD)
-  - Dropdown shows training start years (2008–2024) from the 'train_start' column.
-  - Displays walk-forward out-of-sample results for the selected training window.
 """
 
 import os
@@ -36,33 +20,30 @@ from datetime import datetime, timedelta
 import pytz
 import pickle
 
-# ── Global Error Handler (for debugging in Streamlit Cloud) ───────────────────
+# ── Global Error Handler ──────────────────────────────────────────────────────
 def handle_exception(exc_type, exc_value, exc_traceback):
-    """Print exceptions to stderr for Streamlit Cloud logs"""
     print("".join(traceback.format_exception(exc_type, exc_value, exc_traceback)))
     sys.__excepthook__(exc_type, exc_value, exc_traceback)
 
 sys.excepthook = handle_exception
 
-# ── Environment & Config ─────────────────────────────────────────────────────
+# ── Config Import with Error Handling ────────────────────────────────────────
 try:
     import config as cfg
 except ImportError as e:
     st.error(f"Failed to import config.py: {e}")
     st.stop()
 
-# Environment variables with fallbacks
+# Environment variables
 HF_TOKEN    = os.environ.get("HF_TOKEN", getattr(cfg, 'HF_TOKEN', ''))
 GH_PAT      = os.environ.get("GH_PAT", getattr(cfg, 'GH_PAT', ''))
 GITHUB_REPO = os.environ.get("GITHUB_REPO", getattr(cfg, 'GITHUB_REPO', ''))
 
-# Validate HF_TOKEN
 if not HF_TOKEN:
     st.error("⚠️ HF_TOKEN not found. Please set it in Streamlit Cloud Secrets.")
-    st.info("Go to Settings → Secrets and add: HF_TOKEN = 'your_token_here'")
     st.stop()
 
-# ── Page Config (MUST be first Streamlit command) ────────────────────────────
+# ── Page Config ───────────────────────────────────────────────────────────────
 st.set_page_config(
     page_title="P2-ETF Regime Predictor",
     page_icon="📈",
@@ -70,7 +51,7 @@ st.set_page_config(
     initial_sidebar_state="expanded",
 )
 
-# ── Utilities ─────────────────────────────────────────────────────────────────
+# ── Utilities ───────────────────────────────────────────────────────────────
 
 def _today_est():
     return datetime.now(pytz.timezone("US/Eastern")).date()
@@ -106,10 +87,6 @@ def _etf_colour(etf: str) -> str:
 
 
 def _extract_prediction_columns(pred_df: pd.DataFrame, target_etfs: list) -> pd.DataFrame:
-    """
-    Extract probability columns (ending with '_P') from predictions DataFrame
-    and rename them to the ETF ticker.
-    """
     if pred_df is None or pred_df.empty:
         return pd.DataFrame()
     
@@ -127,16 +104,16 @@ def _extract_prediction_columns(pred_df: pd.DataFrame, target_etfs: list) -> pd.
 
 
 def _safe_get_config(attr, default=None):
-    """Safely get config attribute with default"""
     return getattr(cfg, attr, default)
 
 
-# ── Cached Loaders (FIXED: proper TTL, error handling, no force_download) ─────
+# ── Cached Loaders (ALL local imports moved INSIDE functions) ────────────────
 
-@st.cache_resource(ttl=3600)  # Cache for 1 hour instead of 0
+@st.cache_resource(ttl=3600)
 def _load_detector(option: str):
-    """Load regime detector from Hugging Face"""
+    """Load regime detector - imports deferred to prevent circular import"""
     try:
+        # LOCAL IMPORT - prevents circular import
         import data_manager_hf as dm
         from regime_detection import RegimeDetector
         b = dm.load_detector(option)
@@ -146,15 +123,12 @@ def _load_detector(option: str):
         return None
 
 
-@st.cache_data(ttl=1800)  # Cache for 30 minutes
+@st.cache_data(ttl=1800)
 def _load_wf_preds(option: str) -> pd.DataFrame:
-    """
-    Load walk-forward predictions from Hugging Face.
-    FIXED: Removed force_download=True to prevent timeouts
-    """
+    """Load walk-forward predictions - imports deferred"""
     try:
+        # LOCAL IMPORT - prevents circular import
         import data_manager_hf as dm
-        # Use local cache first, don't force download every time
         df = dm.load_wf_predictions(option, force_download=False)
         return df if df is not None else pd.DataFrame()
     except Exception as e:
@@ -165,8 +139,9 @@ def _load_wf_preds(option: str) -> pd.DataFrame:
 
 @st.cache_data(ttl=3600)
 def _load_insample_preds(option: str) -> pd.DataFrame:
-    """Load in-sample predictions"""
+    """Load in-sample predictions - imports deferred"""
     try:
+        # LOCAL IMPORT - prevents circular import
         import data_manager_hf as dm
         df = dm.load_predictions(option)
         return df if df is not None else pd.DataFrame()
@@ -177,8 +152,9 @@ def _load_insample_preds(option: str) -> pd.DataFrame:
 
 @st.cache_data(ttl=3600)
 def _load_dataset(option: str, start_year: int) -> pd.DataFrame:
-    """Load dataset from Hugging Face"""
+    """Load dataset - imports deferred"""
     try:
+        # LOCAL IMPORT - prevents circular import
         import data_manager_hf as dm
         return dm.get_data(option=option, start_year=start_year, force_refresh=False)
     except Exception as e:
@@ -189,8 +165,9 @@ def _load_dataset(option: str, start_year: int) -> pd.DataFrame:
 
 @st.cache_data(ttl=1800)
 def _load_sweep(option: str) -> tuple:
-    """Load sweep results"""
+    """Load sweep results - imports deferred"""
     try:
+        # LOCAL IMPORT - prevents circular import
         import data_manager_hf as dm
         return dm.load_sweep_results(option)
     except Exception as e:
@@ -202,8 +179,13 @@ def _load_sweep(option: str) -> tuple:
 
 def run_strategy(pred_df: pd.DataFrame, df: pd.DataFrame,
                  target_etfs: list, params: dict) -> dict:
-    """Execute trading strategy with error handling"""
-    from strategy import execute_strategy, calculate_metrics
+    """Execute trading strategy - imports deferred"""
+    # LOCAL IMPORTS - prevents circular import
+    try:
+        from strategy import execute_strategy, calculate_metrics
+    except ImportError as e:
+        st.error(f"Failed to import strategy module: {e}")
+        return {}
     
     try:
         common = pred_df.index.intersection(df.index)
@@ -221,7 +203,6 @@ def run_strategy(pred_df: pd.DataFrame, df: pd.DataFrame,
             
         daily_rets = df_bt[ret_cols]
         
-        # Get risk-free rate
         rf_rate = _safe_get_config('RISK_FREE_RATE', 0.05)
         if "DTB3" in df_bt.columns:
             try:
@@ -229,12 +210,10 @@ def run_strategy(pred_df: pd.DataFrame, df: pd.DataFrame,
             except (ValueError, TypeError):
                 pass
         
-        # Get regime series
         regime_series = pd.Series("Unknown", index=df_bt.index)
         if "Regime_Name" in df_bt.columns:
             regime_series = df_bt["Regime_Name"]
 
-        # Execute strategy
         (strat_rets, audit_trail, _, next_signal,
          conviction_z, conviction_label, last_p) = execute_strategy(
             predictions_df=pred_bt,
@@ -273,7 +252,6 @@ def run_strategy(pred_df: pd.DataFrame, df: pd.DataFrame,
 
 def show_hero_banner(next_signal, conviction_label, conviction_z,
                      regime_name, next_date, label=""):
-    """Display hero banner with signal"""
     regime_col = _regime_colour(regime_name)
     accent_col = (_conviction_colour(conviction_label)
                   if conviction_label in ("High", "Very High")
@@ -312,7 +290,6 @@ def show_hero_banner(next_signal, conviction_label, conviction_z,
 
 
 def show_prob_bars(last_p: list, target_etfs: list, option: str):
-    """Display probability bars for each ETF"""
     st.subheader("P(Beat Cash) — Next 5 Days")
     n = len(target_etfs)
     if n == 0:
@@ -332,7 +309,6 @@ def show_prob_bars(last_p: list, target_etfs: list, option: str):
 
 
 def show_metrics(metrics: dict, rf_rate: float, option: str):
-    """Display performance metrics"""
     st.subheader("📊 Performance Metrics")
     
     ann_return = metrics.get('ann_return', 0) or 0
@@ -348,7 +324,6 @@ def show_metrics(metrics: dict, rf_rate: float, option: str):
 
 def show_equity_curve(cum_rets: np.ndarray, dates: pd.Index,
                       option: str, suffix: str = ""):
-    """Display equity curve"""
     st.subheader("📈 Equity Curve")
     
     if cum_rets is None or len(cum_rets) == 0:
@@ -377,7 +352,6 @@ def show_equity_curve(cum_rets: np.ndarray, dates: pd.Index,
 
 def show_regime_timeline(df_bt: pd.DataFrame, pred_bt: pd.DataFrame,
                          option: str, suffix: str = ""):
-    """Display regime timeline"""
     if "Regime_Name" not in df_bt.columns:
         return
         
@@ -408,7 +382,6 @@ def show_regime_timeline(df_bt: pd.DataFrame, pred_bt: pd.DataFrame,
 
 def show_audit_trail(audit_trail: list, target_etfs: list,
                      option: str, suffix: str = ""):
-    """Display audit trail"""
     st.subheader("📋 Audit Trail — Last 30 Trading Days")
     if not audit_trail:
         st.info("No audit trail available.")
@@ -451,14 +424,12 @@ def show_audit_trail(audit_trail: list, target_etfs: list,
 
         st.dataframe(styled, use_container_width=True,
                      key=f"audit_trail_{option}_{suffix}")
-    except Exception as e:
-        # Fallback if styling fails
+    except Exception:
         st.dataframe(audit_df, use_container_width=True,
                      key=f"audit_trail_{option}_{suffix}")
 
 
 def _check_staleness(pred_bt: pd.DataFrame):
-    """Check if predictions are stale"""
     if pred_bt is None or pred_bt.empty:
         return
         
@@ -477,7 +448,6 @@ def _check_staleness(pred_bt: pd.DataFrame):
 
 def _render_results(result: dict, target_etfs: list, option: str,
                     suffix: str, banner_label: str):
-    """Shared display logic for results"""
     if not result:
         st.error("No results to display.")
         return
@@ -516,7 +486,6 @@ def _render_results(result: dict, target_etfs: list, option: str,
 # ── Single-Year Tab ──────────────────────────────────────────────────────────
 
 def render_single_year_tab(option: str, target_etfs: list, params: dict):
-    """Render single year tab with training window selection"""
     test_start = "2025-01-01"
     current_year = datetime.now().year
 
@@ -528,7 +497,6 @@ def render_single_year_tab(option: str, target_etfs: list, params: dict):
         st.info("Expected file: wf_mom_pred_history.parquet in HF dataset")
         return
 
-    # Debug info (collapsible)
     with st.expander("🔧 Debug info (click to expand)"):
         st.code(f"Columns: {list(wf_preds.columns)}")
         st.write(f"Shape: {wf_preds.shape}")
@@ -540,13 +508,11 @@ def render_single_year_tab(option: str, target_etfs: list, params: dict):
         else:
             st.error("❌ 'train_start' column MISSING")
 
-    # Ensure we have train_start column
     if "train_start" not in wf_preds.columns:
         st.error("Cannot display training windows: 'train_start' column is missing.")
         st.info("Please re-run training with the updated pipeline.")
         return
 
-    # Get training start years
     train_start_years = sorted(wf_preds["train_start"].unique())
     train_start_years = [y for y in train_start_years if 2008 <= y <= 2024]
 
@@ -566,7 +532,6 @@ def render_single_year_tab(option: str, target_etfs: list, params: dict):
         key=f"train_start_select_{option}",
     )
 
-    # Filter predictions
     window_preds_raw = wf_preds[
         (wf_preds["train_start"] == selected_train_start) &
         (wf_preds.index >= test_start)
@@ -576,7 +541,6 @@ def render_single_year_tab(option: str, target_etfs: list, params: dict):
         st.warning(f"No predictions for training start {selected_train_start} in test period.")
         return
 
-    # Extract prediction columns
     pred_df = _extract_prediction_columns(window_preds_raw, target_etfs)
     if pred_df.empty:
         st.error(f"Could not find prediction columns for {target_etfs}.")
@@ -588,7 +552,6 @@ def render_single_year_tab(option: str, target_etfs: list, params: dict):
         missing = set(target_etfs) - set(available_etfs)
         st.warning(f"Missing predictions for: {', '.join(missing)}. Using: {available_etfs}")
 
-    # Load dataset
     with st.spinner("Loading dataset..."):
         start_year = _safe_get_config('START_YEAR_DEFAULT', 2008)
         df = _load_dataset(option, start_year)
@@ -597,7 +560,6 @@ def render_single_year_tab(option: str, target_etfs: list, params: dict):
         st.error("Dataset could not be loaded from Hugging Face.")
         return
 
-    # Add regime info
     detector = _load_detector(option)
     if detector is not None:
         try:
@@ -626,17 +588,16 @@ def render_single_year_tab(option: str, target_etfs: list, params: dict):
     )
 
 
-# ── Consensus Tab ────────────────────────────────────────────────────────────
+# ── Consensus Tab ───────────────────────────────────────────────────────────
 
 def _compute_consensus(sweep_data: dict) -> dict:
-    """Compute consensus across years"""
     if not sweep_data:
         return {}
 
     def _safe(v, default=0.0):
         try:
             f = float(v)
-            return default if (f != f) else f  # Check for NaN
+            return default if (f != f) else f
         except (TypeError, ValueError):
             return default
 
@@ -706,7 +667,6 @@ def _compute_consensus(sweep_data: dict) -> dict:
 
 
 def render_consensus_tab(option: str, target_etfs: list):
-    """Render consensus tab"""
     st.caption(
         "Weighted consensus across training start years. "
         "Score: 40% Return · 20% Z-Score · 20% Sharpe · 20% (−MaxDD)"
@@ -903,7 +863,6 @@ def main():
             "Walk-forward validated · Data: Hugging Face"
         )
 
-        # Get ETF lists from config
         option_a_etfs = _safe_get_config('OPTION_A_ETFS', ['TLT', 'VNQ', 'SLV', 'GLD', 'LQD', 'HYG'])
         option_b_etfs = _safe_get_config('OPTION_B_ETFS', ['SPY', 'QQQ', 'XLK', 'XLF', 'XLE', 'XLV'])
 
