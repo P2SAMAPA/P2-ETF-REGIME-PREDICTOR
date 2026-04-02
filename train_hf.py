@@ -3,22 +3,20 @@ train_hf.py — P2-ETF-REGIME-PREDICTOR v2
 =========================================
 Training pipeline for Option A (FI/Commodities) and Option B (Equity ETFs).
 
-Usage:
-  python train_hf.py --option a                        # Full train Option A
-  python train_hf.py --option b                        # Full train Option B
-  python train_hf.py --option a --force-refresh        # Force data rebuild
-  python train_hf.py --option a --wfcv                 # Walk-forward CV (incremental)
-  python train_hf.py --option a --sweep                # Consensus sweep
-  python train_hf.py --option a --sweep-year 2015      # Sweep for one year
-  python train_hf.py --option a --single-year 2015     # Single-year WF test
+New shrinking‑window scheme:
+- Fixed test start (e.g., 2025-01-01)
+- Test end is dynamic: always up to the latest date in the dataset (YTD)
+- Multiple training windows with fixed end (2024-12-31) and varying start years
+- Predictions for the same test period from each window are stored with a train_start column
 
-Performance notes
-─────────────────
-  Full training:   ~25–30 min per option (full k-selection + 5 inits)
-  WF CV:           ~4–8 min per fold × 14 folds = ~60–90 min per option
-                   fixed_k loaded from saved HF detector — no re-fitting
-                   incremental: only missing folds computed
-  Sweep:           ~5–8 min per sweep year
+Usage:
+  python train_hf.py --option a                        # Full train all windows (Option A)
+  python train_hf.py --option b                        # Full train all windows (Option B)
+  python train_hf.py --option a --force-refresh        # Force data rebuild
+  python train_hf.py --option a --wfcv                 # Incremental walk-forward CV (fast path)
+  python train_hf.py --option a --sweep                # Consensus sweep across all windows
+  python train_hf.py --option a --sweep-year 2008      # Sweep for one window (train start year)
+  python train_hf.py --option a --single-year 2008     # Single‑window WF for a specific train start year
 """
 
 import os
@@ -130,250 +128,218 @@ def get_top_pick(ranker: MomentumRanker, row: pd.Series) -> str:
     return preds["Rank_Score"].idxmax()
 
 
-# ── Full training pipeline ────────────────────────────────────────────────────
+# ── Full training pipeline (all windows) ───────────────────────────────────────
 
-def run_full_training(option: str, force_refresh: bool = False) -> tuple:
+def run_full_training(option: str, force_refresh: bool = False) -> None:
     """
-    Full train. Saves detector (with optimal_k_) to HF so WF CV
-    can load fixed_k without re-running k-selection.
+    Train all windows sequentially. Saves detector (with optimal_k_) once.
+    Predictions are stored in a single table with a train_start column.
     """
     log.info(f"{'='*60}")
-    log.info(f"{_label(option)}: full training pipeline")
+    log.info(f"{_label(option)}: full training pipeline (all windows)")
     log.info(f"{'='*60}")
-
-    df          = get_data(option=option, start_year=cfg.START_YEAR_DEFAULT,
-                           force_refresh=force_refresh)
-    detector    = train_regime_detector(df, option, wf_mode=False)
-    ranker      = train_momentum_ranker(df, detector, option)
-    predictions = generate_predictions(df, ranker, option)
-
-    log.info(f"{_label(option)}: uploading artefacts to HF...")
-    save_detector(pickle.dumps(detector), option)
-    save_ranker(pickle.dumps(ranker), option)
-    save_predictions(predictions, option)
-
-    feature_cols = [c for c in df.columns
-                    if any(t in c for t in _target_etfs(option))]
-    save_feature_list(feature_cols, option)
-
-    last_row    = df.loc[predictions.index[-1]]
-    top_pick    = get_top_pick(ranker, last_row)
-    signals_row = predictions.tail(1).copy()
-    signals_row["Signal"] = top_pick
-    save_signals(signals_row, option)
-
-    log.info(f"{_label(option)}: full training complete. "
-             f"Today's signal: {top_pick}")
-    return detector, ranker, predictions
-
-
-# ── Walk-forward CV (incremental, fast path) ──────────────────────────────────
-
-def run_walk_forward_cv(option: str,
-                        force_refresh: bool = False) -> Optional[pd.DataFrame]:
-    """
-    Incremental WF CV. Loads fixed_k from saved HF detector — no re-fitting.
-    Uses wf_mode fast path per fold (n_init=2, max_windows=800, max_iter=20).
-    Only computes missing folds.
-    """
-    log.info(f"{_label(option)}: incremental walk-forward CV (fast path)...")
 
     df = get_data(option=option, start_year=cfg.START_YEAR_DEFAULT,
                   force_refresh=force_refresh)
 
-    # Which folds already exist?
-    existing_wf = load_wf_predictions(option, force_download=True)
-    completed_years = set()
-    if existing_wf is not None and not existing_wf.empty:
-        completed_years = set(existing_wf.index.year.unique().tolist())
-        log.info(f"{_label(option)}: WF folds already computed: "
-                 f"{sorted(completed_years)}")
+    # Determine which windows already have predictions (incremental)
+    existing = load_wf_predictions(option, force_download=True)
+    existing_start_years = set()
+    if existing is not None and not existing.empty and "train_start" in existing.columns:
+        existing_start_years = set(existing["train_start"].unique())
+        log.info(f"{_label(option)}: already computed windows: {sorted(existing_start_years)}")
 
-    # Load fixed_k from saved detector — avoids ~20 min k-selection
+    # Load or compute fixed_k once (use the latest window for k-selection, or any)
     fixed_k = _load_fixed_k(option)
     if fixed_k is None:
-        log.info(f"{_label(option)}: no saved detector — running k-selection "
-                 "once on full data...")
-        ret_cols     = [f"{t}_Ret" for t in _target_etfs(option)
-                        if f"{t}_Ret" in df.columns]
+        log.info(f"{_label(option)}: no saved detector — running k-selection on full data...")
+        ret_cols = [f"{t}_Ret" for t in _target_etfs(option)
+                    if f"{t}_Ret" in df.columns]
         ref_detector = RegimeDetector(window=20, k=None)
         ref_detector.fit(df[ret_cols], wf_mode=False)
         fixed_k = ref_detector.optimal_k_
 
-    log.info(f"{_label(option)}: using fixed_k={fixed_k} for all WF folds")
-
-    new_folds = []
+    all_preds = []
     for window in cfg.WINDOWS:
-        test_year = int(window["test_year"])
-
-        if test_year in completed_years:
-            log.info(f"{_label(option)}: WF fold {test_year} "
-                     "already exists — skipping")
+        start_year = int(window["train_start"].split("-")[0])
+        if start_year in existing_start_years:
+            log.info(f"{_label(option)}: window train start {start_year} already exists — skipping")
             continue
 
-        train_mask = ((df.index >= window["train_start"]) &
-                      (df.index <= window["train_end"]))
-        test_mask  = ((df.index > window["train_end"]) &
-                      (df.index <= f"{test_year}-12-31"))
+        train_mask = (df.index >= window["train_start"]) & (df.index <= window["train_end"])
+        # test_end: use the window's end if provided, otherwise use the latest date in df
+        test_end = window["test_end"] if window["test_end"] is not None else df.index.max()
+        test_mask = (df.index >= window["test_start"]) & (df.index <= test_end)
         train_df = df[train_mask]
         test_df  = df[test_mask]
 
         if len(train_df) < 252 or len(test_df) < 5:
-            log.warning(f"{_label(option)}: insufficient data for "
-                        f"WF fold {test_year} — skipping")
+            log.warning(f"{_label(option)}: insufficient data for train start {start_year} — skipping")
             continue
 
-        log.info(f"{_label(option)}: WF fold {test_year} — "
-                 f"train {train_df.index[0].date()}→"
-                 f"{train_df.index[-1].date()}, "
-                 f"test {test_df.index[0].date()}→"
-                 f"{test_df.index[-1].date()}")
+        log.info(f"{_label(option)}: window train start {start_year} — "
+                 f"train {train_df.index[0].date()}→{train_df.index[-1].date()}, "
+                 f"test {test_df.index[0].date()}→{test_df.index[-1].date()}")
 
-        detector   = train_regime_detector(train_df, option,
-                                           wf_mode=True, fixed_k=fixed_k)
-        ranker     = train_momentum_ranker(train_df, detector, option)
-        test_df    = detector.add_regime_to_df(test_df)
+        detector = train_regime_detector(train_df, option,
+                                         wf_mode=True, fixed_k=fixed_k)
+        ranker   = train_momentum_ranker(train_df, detector, option)
+        test_df  = detector.add_regime_to_df(test_df)
         fold_preds = ranker.predict_all_history(test_df)
-        new_folds.append(fold_preds)
-        log.info(f"{_label(option)}: WF fold {test_year} complete "
-                 f"— {len(fold_preds)} OOS predictions")
 
-    if not new_folds:
-        log.info(f"{_label(option)}: no new WF folds to compute.")
-        return existing_wf
+        # Add a column indicating the training start year
+        fold_preds["train_start"] = start_year
 
-    new_preds = pd.concat(new_folds).sort_index()
-    if existing_wf is not None and not existing_wf.empty:
-        merged = (pd.concat([existing_wf, new_preds])
-                  .pipe(lambda d: d[~d.index.duplicated(keep="last")])
-                  .sort_index())
+        all_preds.append(fold_preds)
+        log.info(f"{_label(option)}: window train start {start_year} complete — "
+                 f"{len(fold_preds)} OOS predictions")
+
+    if not all_preds:
+        log.info(f"{_label(option)}: no new windows to compute.")
+        return
+
+    new_preds = pd.concat(all_preds).sort_index()
+    if existing is not None and not existing.empty:
+        # If existing has no train_start column, we drop it (should not happen)
+        if "train_start" not in existing.columns:
+            log.warning("Existing predictions lack train_start column; resetting.")
+            merged = new_preds
+        else:
+            merged = (pd.concat([existing, new_preds])
+                      .pipe(lambda d: d[~d.index.duplicated(keep="last")])
+                      .sort_index())
     else:
         merged = new_preds
 
     save_wf_predictions(merged, option)
     log.info(f"{_label(option)}: WF CV complete — {len(merged)} total OOS rows")
-    return merged
 
 
-# ── Single-year walk-forward ──────────────────────────────────────────────────
+# ── Single‑window training (by train start year) ─────────────────────────────
 
-def run_single_year(year: int, option: str,
+def run_single_year(start_year: int, option: str,
                     force_refresh: bool = False) -> Optional[pd.DataFrame]:
+    """
+    Train a single window for a given train start year.
+    """
     window = next((w for w in cfg.WINDOWS
-                   if w["test_year"] == str(year)), None)
+                   if w["train_start"].startswith(str(start_year))), None)
     if not window:
-        log.error(f"{_label(option)}: no window for test year {year}")
+        log.error(f"{_label(option)}: no window for train start year {start_year}")
         return None
 
-    log.info(f"{_label(option)}: single-year WF for {year} (fast path)...")
+    log.info(f"{_label(option)}: single‑window for train start {start_year}...")
     df = get_data(option=option, start_year=cfg.START_YEAR_DEFAULT,
                   force_refresh=force_refresh)
 
-    train_mask = ((df.index >= window["train_start"]) &
-                  (df.index <= window["train_end"]))
-    test_mask  = ((df.index > window["train_end"]) &
-                  (df.index <= f"{year}-12-31"))
+    train_mask = (df.index >= window["train_start"]) & (df.index <= window["train_end"])
+    test_end = window["test_end"] if window["test_end"] is not None else df.index.max()
+    test_mask = (df.index >= window["test_start"]) & (df.index <= test_end)
     train_df, test_df = df[train_mask], df[test_mask]
 
     if len(train_df) < 252 or len(test_df) < 5:
-        log.error(f"{_label(option)}: insufficient data for year {year}")
+        log.error(f"{_label(option)}: insufficient data for start year {start_year}")
         return None
 
     fixed_k = _load_fixed_k(option)
     if fixed_k is None:
-        ret_cols     = [f"{t}_Ret" for t in _target_etfs(option)
-                        if f"{t}_Ret" in df.columns]
+        ret_cols = [f"{t}_Ret" for t in _target_etfs(option)
+                    if f"{t}_Ret" in df.columns]
         ref_detector = RegimeDetector(window=20, k=None)
         ref_detector.fit(df[ret_cols], wf_mode=False)
         fixed_k = ref_detector.optimal_k_
 
-    detector   = train_regime_detector(train_df, option,
-                                       wf_mode=True, fixed_k=fixed_k)
-    ranker     = train_momentum_ranker(train_df, detector, option)
-    test_df    = detector.add_regime_to_df(test_df)
-    test_preds = ranker.predict_all_history(test_df)
+    detector = train_regime_detector(train_df, option,
+                                     wf_mode=True, fixed_k=fixed_k)
+    ranker   = train_momentum_ranker(train_df, detector, option)
+    test_df  = detector.add_regime_to_df(test_df)
+    fold_preds = ranker.predict_all_history(test_df)
+    fold_preds["train_start"] = start_year
 
-    existing_wf = load_wf_predictions(option, force_download=True)
-    if existing_wf is not None and not existing_wf.empty:
-        merged = (pd.concat([existing_wf, test_preds])
-                  .pipe(lambda d: d[~d.index.duplicated(keep="last")])
-                  .sort_index())
+    existing = load_wf_predictions(option, force_download=True)
+    if existing is not None and not existing.empty:
+        if "train_start" not in existing.columns:
+            log.warning("Existing predictions lack train_start column; resetting.")
+            merged = fold_preds
+        else:
+            merged = (pd.concat([existing, fold_preds])
+                      .pipe(lambda d: d[~d.index.duplicated(keep="last")])
+                      .sort_index())
     else:
-        merged = test_preds
+        merged = fold_preds
 
     save_wf_predictions(merged, option)
-    log.info(f"{_label(option)}: single-year WF {year} saved "
-             f"({len(test_preds)} rows)")
-    return test_preds
+    log.info(f"{_label(option)}: single‑window {start_year} saved ({len(fold_preds)} rows)")
+    return fold_preds
 
 
-# ── Consensus sweep ───────────────────────────────────────────────────────────
+# ── Consensus sweep (over all windows) ───────────────────────────────────────
 
 def run_sweep(option: str, years: Optional[list] = None,
               force_refresh: bool = False) -> None:
     """
-    Consensus sweep. Uses sweep_mode fast path.
-    Passes target_etfs to execute_strategy so Option B signals
-    correctly across its equity universe (not TLT/VNQ/etc).
+    Consensus sweep over all windows (or a subset of train start years).
+    For each window, runs the full strategy on the test period and records metrics.
     """
-    years  = years or cfg.SWEEP_YEARS
-    etfs   = _target_etfs(option)
-    log.info(f"{_label(option)}: consensus sweep for years {years}...")
+    if years:
+        windows = [w for w in cfg.WINDOWS if int(w["train_start"].split("-")[0]) in years]
+    else:
+        windows = cfg.WINDOWS
+
+    etfs = _target_etfs(option)
+    log.info(f"{_label(option)}: consensus sweep for windows: "
+             f"{[w['train_start'] for w in windows]}...")
+
     df = get_data(option=option, start_year=cfg.START_YEAR_DEFAULT,
                   force_refresh=force_refresh)
 
-    for year in years:
-        window = next((w for w in cfg.WINDOWS
-                       if w["test_year"] == str(year)), None)
-        if not window:
-            log.warning(f"{_label(option)}: no window for sweep year "
-                        f"{year} — skipping")
-            continue
+    # Ensure we have a fixed_k
+    fixed_k = _load_fixed_k(option)
+    if fixed_k is None:
+        ret_cols = [f"{t}_Ret" for t in _target_etfs(option)
+                    if f"{t}_Ret" in df.columns]
+        ref_detector = RegimeDetector(window=20, k=None)
+        ref_detector.fit(df[ret_cols], wf_mode=False)
+        fixed_k = ref_detector.optimal_k_
 
-        train_mask = ((df.index >= window["train_start"]) &
-                      (df.index <= window["train_end"]))
+    for window in windows:
+        train_mask = (df.index >= window["train_start"]) & (df.index <= window["train_end"])
+        test_end = window["test_end"] if window["test_end"] is not None else df.index.max()
+        test_mask = (df.index >= window["test_start"]) & (df.index <= test_end)
         train_df = df[train_mask]
+        test_df  = df[test_mask]
 
-        if len(train_df) < 252:
-            log.warning(f"{_label(option)}: insufficient training data "
-                        f"for sweep year {year} — skipping")
+        if len(train_df) < 252 or len(test_df) < 5:
+            log.warning(f"{_label(option)}: insufficient data for window {window['train_start']} — skipping")
             continue
 
-        log.info(f"{_label(option)}: sweep year {year} "
-                 f"({len(train_df)} training days)...")
+        start_year = int(window["train_start"].split("-")[0])
+        log.info(f"{_label(option)}: sweep window train start {start_year} "
+                 f"({len(train_df)} training days)")
 
-        detector = train_regime_detector(train_df, option, sweep_mode=True)
-
-        # Add regime labels to train_df — detector was fitted on train_df[ret_cols]
-        # so its dates_ index aligns with train_df.index after the warmup window.
-        # We must use the full train_df (not just ret_cols) for add_regime_to_df.
+        detector = train_regime_detector(train_df, option, sweep_mode=True,
+                                         fixed_k=fixed_k)
         train_r = detector.add_regime_to_df(train_df)
-
-        # Debug: confirm regime labels were applied
-        n_regime = train_r["Regime_Name"].notna().sum() if "Regime_Name" in train_r.columns else 0
-        n_unknown = (train_r["Regime_Name"] == "Unknown").sum() if "Regime_Name" in train_r.columns else len(train_r)
-        log.info(f"{_label(option)}: sweep {year} — regime labels: "
-                 f"{n_regime} rows labelled, {n_unknown} Unknown")
-
         ranker = MomentumRanker(target_etfs=etfs)
         ranker.fit(train_r)
         predictions = generate_predictions(train_r, ranker, option)
 
-        # Build ret_df aligned to predictions index
-        ret_cols  = [f"{t}_Ret" for t in etfs if f"{t}_Ret" in train_r.columns]
-        common    = predictions.index.intersection(train_r.index)
-        ret_df    = train_r.loc[common, ret_cols]
+        # Align test period
+        common = predictions.index.intersection(test_df.index)
+        if len(common) == 0:
+            log.warning(f"{_label(option)}: no common dates for test period in window {start_year}")
+            continue
+
+        ret_cols = [f"{t}_Ret" for t in etfs if f"{t}_Ret" in test_df.columns]
+        ret_df = test_df.loc[common, ret_cols]
         pred_aligned = predictions.loc[common]
 
-        log.info(f"{_label(option)}: sweep {year} — "
-                 f"predictions={len(predictions)}, ret_df={len(ret_df)}, "
-                 f"common={len(common)}")
+        # Risk‑free rate from test period
+        rf_rate = (float(test_df["DTB3"].iloc[-1] / 100)
+                   if "DTB3" in test_df.columns else cfg.RISK_FREE_RATE)
 
-        rf_rate = (float(train_r["DTB3"].iloc[-1] / 100)
-                   if "DTB3" in train_r.columns else cfg.RISK_FREE_RATE)
-
-        regime_series = (train_r["Regime_Name"].reindex(common)
-                         if "Regime_Name" in train_r.columns
+        regime_series = (test_df["Regime_Name"].reindex(common)
+                         if "Regime_Name" in test_df.columns
                          else pd.Series("Unknown", index=common))
 
         try:
@@ -388,25 +354,18 @@ def run_sweep(option: str, years: Optional[list] = None,
                 regime_series=regime_series,
                 target_etfs=etfs,
             )
-            log.info(f"{_label(option)}: sweep {year} — "
-                     f"strat_rets len={len(strat_rets)}, "
-                     f"mean={float(np.nanmean(strat_rets)):.4f}, "
-                     f"nan_count={int(np.isnan(strat_rets).sum())}")
-            # Drop any NaN returns (e.g. from first-row warmup) before metrics
             strat_rets_clean = strat_rets[~np.isnan(strat_rets)]
             metrics = calculate_metrics(strat_rets_clean, rf_rate=rf_rate)
             sweep_z, sweep_label = compute_sweep_z(strat_rets_clean, rf_rate=rf_rate)
         except Exception as e:
-            log.warning(f"{_label(option)}: strategy failed for "
-                        f"sweep year {year}: {e}")
-            import traceback; traceback.print_exc()
+            log.warning(f"{_label(option)}: strategy failed for window {start_year}: {e}")
             metrics      = {}
             next_signal  = "CASH"
             sweep_z      = 0.0
             sweep_label  = "Low"
 
-        regime_name = (train_r["Regime_Name"].iloc[-1]
-                       if "Regime_Name" in train_r.columns else "Unknown")
+        regime_name = (test_df["Regime_Name"].iloc[-1]
+                       if "Regime_Name" in test_df.columns else "Unknown")
 
         result = {
             "signal":     next_signal,
@@ -417,8 +376,8 @@ def run_sweep(option: str, years: Optional[list] = None,
             "conviction": sweep_label,
             "regime":     str(regime_name),
         }
-        save_sweep_result(result, year, option)
-        log.info(f"{_label(option)}: sweep {year} — "
+        save_sweep_result(result, start_year, option)
+        log.info(f"{_label(option)}: sweep window {start_year} — "
                  f"signal={next_signal}, "
                  f"return={result['ann_return']:.1%}, "
                  f"sharpe={result['sharpe']:.2f}, "
@@ -431,7 +390,7 @@ def run_sweep(option: str, years: Optional[list] = None,
 
 def main():
     parser = argparse.ArgumentParser(
-        description="P2-ETF-REGIME-PREDICTOR v2 training pipeline"
+        description="P2-ETF-REGIME-PREDICTOR v2 training pipeline (shrinking window)"
     )
     parser.add_argument("--option", required=True, choices=["a", "b"],
                         help="Which option: a (FI/Commodities) or b (Equity ETFs)")
@@ -440,11 +399,11 @@ def main():
     parser.add_argument("--wfcv", action="store_true",
                         help="Run incremental walk-forward CV (fast path)")
     parser.add_argument("--sweep", action="store_true",
-                        help="Run consensus sweep across all sweep years")
+                        help="Run consensus sweep across all windows")
     parser.add_argument("--sweep-year", type=int, default=None,
-                        help="Run sweep for a single year only")
+                        help="Run sweep for a single train start year only")
     parser.add_argument("--single-year", type=int, default=None,
-                        help="Run single-year walk-forward for a specific test year")
+                        help="Run single‑window walk‑forward for a specific train start year")
 
     args   = parser.parse_args()
     option = args.option.lower()
@@ -459,7 +418,8 @@ def main():
         elif args.sweep:
             run_sweep(option, force_refresh=args.force_refresh)
         elif args.wfcv:
-            run_walk_forward_cv(option, force_refresh=args.force_refresh)
+            # In the new scheme, wfcv is the same as full training (incremental)
+            run_full_training(option, force_refresh=args.force_refresh)
         else:
             run_full_training(option, force_refresh=args.force_refresh)
 
