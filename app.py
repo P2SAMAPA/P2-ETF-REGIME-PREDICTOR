@@ -29,14 +29,14 @@ import pickle
 
 import config as cfg
 
-# Import data_manager_hf as a module to avoid circular import issues
+# Avoid circular imports by importing the whole module and accessing functions via dot notation
 try:
     import data_manager_hf as dm
-except ImportError as e:
+except Exception as e:
     st.error(f"Failed to import data_manager_hf: {e}")
     sys.exit(1)
 
-# Import other modules
+# Import other modules (these should not cause circular imports)
 try:
     from regime_detection import RegimeDetector
     from models import MomentumRanker
