@@ -275,19 +275,41 @@ def show_hero_banner(next_signal, conviction_label, conviction_z,
 
 
 def show_prob_bars(last_p: list, target_etfs: list, option: str):
-    st.subheader("P(Beat Cash) — Next 5 Days")
+    """
+    Display ETF probability bars.
+
+    CORRECTED: Now properly handles the probability values from the 
+    softmax-based calculation in MomentumRanker. The values should
+    represent actual relative momentum probabilities, not uniform 50%.
+    """
+    st.subheader("Momentum Probability — Next 5 Days")
     n = len(target_etfs)
     if n == 0:
         st.info("No ETF data available.")
         return
+
+    # CORRECTED: Check if all probabilities are the same (indicates bug/old data)
+    if len(set(last_p)) == 1:
+        st.warning("⚠️ All ETFs show identical probabilities. This may indicate:")
+        st.markdown("""
+        - Legacy data from before the probability calculation fix
+        - Insufficient variance in momentum scores
+        - Missing data for the calculation period
+
+        **Recommendation:** Re-run the training pipeline to generate new predictions.
+        """)
+
     cols = st.columns(min(n, 6))
     for i, etf in enumerate(target_etfs):
         p_val = last_p[i] if i < len(last_p) else 0.5
+        # CORRECTED: Use proper baseline comparison (1/n instead of 0.5)
+        baseline = 1.0 / n
+        delta = p_val - baseline
         cols[i % 6].metric(
             label=etf,
             value=f"{p_val:.1%}",
-            delta=f"{p_val - 0.5:+.1%} vs baseline",
-            delta_color="normal" if p_val > 0.5 else "inverse",
+            delta=f"{delta:+.1%} vs baseline ({baseline:.1%})",
+            delta_color="normal" if p_val > baseline else "inverse",
         )
 
 
