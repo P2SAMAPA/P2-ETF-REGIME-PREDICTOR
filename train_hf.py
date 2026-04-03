@@ -1,8 +1,9 @@
-train_hf.py — P2-ETF-REGIME-PREDICTOR v2 (CORRECTED)
+"""
+train_hf.py - P2-ETF-REGIME-PREDICTOR v2 (CORRECTED)
 =========================================
 Training pipeline for Option A (FI/Commodities) and Option B (Equity ETFs).
 
-New shrinking‑window scheme:
+New shrinking-window scheme:
 - Fixed test start (e.g., 2025-01-01)
 - Test end is dynamic: always up to the latest date in the dataset (YTD)
 - Multiple training windows with fixed end (2024-12-31) and varying start years
@@ -15,7 +16,7 @@ Usage:
  python train_hf.py --option a --wfcv # Incremental walk-forward CV (fast path)
  python train_hf.py --option a --sweep # Consensus sweep across all windows
  python train_hf.py --option a --sweep-year 2008 # Sweep for one window (train start year)
- python train_hf.py --option a --single-year 2008 # Single‑window WF for a specific train start year
+ python train_hf.py --option a --single-year 2008 # Single-window WF for a specific train start year
 """
 
 import os
@@ -211,7 +212,7 @@ def run_single_year(start_year: int, option: str,
         log.error(f"{_label(option)}: no window for train start year {start_year}")
         return None
 
-    log.info(f"{_label(option)}: single‑window for train start {start_year}...")
+    log.info(f"{_label(option)}: single-window for train start {start_year}...")
     df = get_data(option=option, start_year=cfg.START_YEAR_DEFAULT,
                   force_refresh=force_refresh)
 
@@ -252,7 +253,7 @@ def run_single_year(start_year: int, option: str,
         merged = fold_preds
 
     save_wf_predictions(merged, option)
-    log.info(f"{_label(option)}: single‑window {start_year} saved ({len(fold_preds)} rows)")
+    log.info(f"{_label(option)}: single-window {start_year} saved ({len(fold_preds)} rows)")
     return fold_preds
 
 def run_sweep(option: str, years: Optional[list] = None,
@@ -317,7 +318,7 @@ def run_sweep(option: str, years: Optional[list] = None,
         ret_df = test_df.loc[common, ret_cols]
         pred_aligned = predictions.loc[common]
 
-        # Risk‑free rate from test period
+        # Risk-free rate from test period
         rf_rate = (float(test_df["DTB3"].iloc[-1] / 100)
                    if "DTB3" in test_df.columns else cfg.RISK_FREE_RATE)
 
@@ -385,7 +386,7 @@ def main():
     parser.add_argument("--sweep-year", type=int, default=None,
                         help="Run sweep for a single train start year only")
     parser.add_argument("--single-year", type=int, default=None,
-                        help="Run single‑window walk‑forward for a specific train start year")
+                        help="Run single-window walk-forward for a specific train start year")
 
     args = parser.parse_args()
     option = args.option.lower()
