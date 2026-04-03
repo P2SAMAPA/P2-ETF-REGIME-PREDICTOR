@@ -1,5 +1,4 @@
-"""
-models.py — P2-ETF-REGIME-PREDICTOR v2
+models.py — P2-ETF-REGIME-PREDICTOR v2 (CORRECTED)
 =======================================
 Layer 2 Momentum Ranker — rules-based ETF ranking.
 
@@ -28,13 +27,11 @@ from typing import Optional, List, Dict
 warnings.filterwarnings("ignore")
 log = logging.getLogger(__name__)
 
-# Default ETF list — Option A. Always overridden by passing target_etfs.
-_DEFAULT_TARGET_ETFS = ["TLT", "VNQ", "SLV", "GLD", "LQD", "HYG"]
+# REMOVED: No default ETF list — must be provided explicitly
+# This prevents accidental use of wrong ETF universe
 
 RANDOM_SEED = 42
 
-
-# ── MomentumRanker ────────────────────────────────────────────────────────────
 
 class MomentumRanker:
     """
@@ -43,20 +40,23 @@ class MomentumRanker:
     Parameters
     ----------
     target_etfs : list of ETF tickers to rank. Must match the ETFs
-                  present in the dataset (i.e. Option A or Option B list).
-                  Stored at fit time and used in all predict calls.
+        present in the dataset (i.e. Option A or Option B list).
+        Stored at fit time and used in all predict calls.
     """
 
-    ROC_WEIGHTS     = {5: 0.40, 10: 0.30, 21: 0.20, 63: 0.10}
-    OBV_WEIGHT      = 0.15
+    ROC_WEIGHTS = {5: 0.40, 10: 0.30, 21: 0.20, 63: 0.10}
+    OBV_WEIGHT = 0.15
     BREAKOUT_WEIGHT = 0.15
     MOMENTUM_WEIGHT = 0.70
 
     def __init__(self, target_etfs: Optional[List[str]] = None):
-        self.target_etfs_: List[str] = (
-            list(target_etfs) if target_etfs is not None
-            else list(_DEFAULT_TARGET_ETFS)
-        )
+        # CORRECTED: No default fallback — must provide ETFs explicitly
+        if target_etfs is None:
+            raise ValueError(
+                "target_etfs must be provided explicitly. "
+                "Use cfg.OPTION_A_ETFS or cfg.OPTION_B_ETFS"
+            )
+        self.target_etfs_: List[str] = list(target_etfs)
         self.fitted_ = False
 
     def fit(self, df: pd.DataFrame, **kwargs) -> "MomentumRanker":
@@ -89,16 +89,16 @@ class MomentumRanker:
                 roc_score += w * val
 
             # 2. OBV normalised
-            obv_raw  = float(row.get(f"{etf}_OBV21d", 0.0) or 0.0)
+            obv_raw = float(row.get(f"{etf}_OBV21d", 0.0) or 0.0)
             obv_norm = np.tanh(obv_raw / (abs(obv_raw) + 1e-6)) if obv_raw != 0 else 0.0
 
             # 3. Breakout score (0–1, 1 = at 20d high)
             breakout = float(row.get(f"{etf}_Breakout20d", 0.5) or 0.5)
 
             scores[etf] = (
-                self.MOMENTUM_WEIGHT  * roc_score +
-                self.OBV_WEIGHT       * obv_norm  +
-                self.BREAKOUT_WEIGHT  * (breakout - 0.5)
+                self.MOMENTUM_WEIGHT * roc_score +
+                self.OBV_WEIGHT * obv_norm +
+                self.BREAKOUT_WEIGHT * (breakout - 0.5)
             )
         return scores
 
@@ -106,22 +106,36 @@ class MomentumRanker:
         """
         Returns DataFrame indexed by ETF with columns:
         Rank_Score, Conviction_P, P_Adjusted, Disagree, Source
+
+        CORRECTED: Conviction_P now properly represents relative
+        probability using softmax transformation instead of clamped linear.
         """
-        scores    = self.score_row(row)
-        vals      = np.array(list(scores.values()))
+        scores = self.score_row(row)
+        vals = np.array(list(scores.values()))
+
+        # CORRECTED: Use softmax for proper probability distribution
+        # This ensures probabilities sum to 1 and reflect relative strength
+        if len(vals) > 0:
+            # Subtract max for numerical stability
+            exp_vals = np.exp(vals - np.max(vals))
+            probs = exp_vals / (np.sum(exp_vals) + 1e-9)
+        else:
+            probs = np.ones(len(self.target_etfs_)) / len(self.target_etfs_)
+
         mean, std = vals.mean(), vals.std()
 
         rows = []
-        for etf in self.target_etfs_:
+        for i, etf in enumerate(self.target_etfs_):
             s = scores[etf]
+            z_score = (s - mean) / (std + 1e-9) if std > 1e-9 else 0.0
             rows.append({
-                "ETF":          etf,
-                "Rank_Score":   float(s),
-                "Conviction_P": float(np.clip(
-                    0.5 + (s - mean) / (std + 1e-9) * 0.1, 0, 1)),
-                "P_Adjusted":   float(s - mean),
-                "Disagree":     False,
-                "Source":       "momentum",
+                "ETF": etf,
+                "Rank_Score": float(s),
+                # CORRECTED: Proper probability using softmax
+                "Conviction_P": float(np.clip(probs[i], 0.001, 0.999)),
+                "P_Adjusted": float(z_score),  # Z-score for threshold checks
+                "Disagree": False,
+                "Source": "momentum",
             })
         return pd.DataFrame(rows).set_index("ETF")
 
@@ -129,18 +143,18 @@ class MomentumRanker:
         """
         Run predictions for every row in df — used for backtesting and WF.
         Returns DataFrame indexed by Date with columns:
-          {ETF}_P, {ETF}_PA, {ETF}_RS, {ETF}_Disagree  for each ETF.
+        {ETF}_P, {ETF}_PA, {ETF}_RS, {ETF}_Disagree for each ETF.
         """
         rows = []
         for idx, row in df.iterrows():
             regime = int(row.get("Regime", 0)) if pd.notna(row.get("Regime")) else 0
-            preds  = self.predict(row)
-            entry  = {"Date": idx, "Regime": regime}
+            preds = self.predict(row)
+            entry = {"Date": idx, "Regime": regime}
             for etf in self.target_etfs_:
                 if etf in preds.index:
-                    entry[f"{etf}_P"]        = preds.loc[etf, "Conviction_P"]
-                    entry[f"{etf}_PA"]       = preds.loc[etf, "P_Adjusted"]
-                    entry[f"{etf}_RS"]       = preds.loc[etf, "Rank_Score"]
+                    entry[f"{etf}_P"] = preds.loc[etf, "Conviction_P"]
+                    entry[f"{etf}_PA"] = preds.loc[etf, "P_Adjusted"]
+                    entry[f"{etf}_RS"] = preds.loc[etf, "Rank_Score"]
                     entry[f"{etf}_Disagree"] = False
             rows.append(entry)
         return pd.DataFrame(rows).set_index("Date")
