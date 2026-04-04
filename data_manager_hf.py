@@ -16,16 +16,25 @@ import numpy as np
 
 # Try to import huggingface_hub
 try:
-    from huggingface_hub import HfApi, hf_hub_download, upload_file
+    from huggingface_hub import HfApi, hf_hub_download, upload_file, login
     HF_AVAILABLE = True
 except ImportError:
     HF_AVAILABLE = False
     print("Warning: huggingface_hub not installed. Local mode only.")
 
 
-# Configuration - UPDATE THIS WITH YOUR ACTUAL REPO
-REPO_ID = "P2SAMAPA/p2-etf-regime-predictor"  # Your actual repo
+# Configuration - YOUR ACTUAL REPO
+REPO_ID = "P2SAMAPA/p2-etf-regime-predictor"
 LOCAL_CACHE = "./hf_cache"
+
+# Try to authenticate with token from environment
+HF_TOKEN = os.environ.get("HF_TOKEN")
+if HF_TOKEN and HF_AVAILABLE:
+    try:
+        login(token=HF_TOKEN)
+        print("Authenticated with Hugging Face Hub")
+    except Exception as e:
+        print(f"Authentication failed: {e}")
 
 
 def _ensure_cache_dir():
@@ -63,24 +72,21 @@ def download_from_hub(remote_path: str, local_path: str, repo_id: str = REPO_ID)
         return False
     
     try:
-        # Try downloading from option-specific subfolder
-        try:
-            hf_hub_download(
-                repo_id=repo_id,
-                filename=f"option_{option}/{remote_path}",
-                local_dir=os.path.dirname(local_path),
-                local_dir_use_symlinks=False,
-            )
-            return os.path.exists(local_path)
-        except:
-            # Try root directory
-            hf_hub_download(
-                repo_id=repo_id,
-                filename=remote_path,
-                local_dir=os.path.dirname(local_path),
-                local_dir_use_symlinks=False,
-            )
-            return os.path.exists(local_path)
+        # Try downloading without symlinks
+        downloaded_path = hf_hub_download(
+            repo_id=repo_id,
+            filename=remote_path,
+            local_dir=os.path.dirname(local_path),
+            local_dir_use_symlinks=False,
+            force_download=True,
+        )
+        
+        # If the downloaded path is different, copy/move it
+        if downloaded_path != local_path and os.path.exists(downloaded_path):
+            import shutil
+            shutil.copy2(downloaded_path, local_path)
+        
+        return os.path.exists(local_path)
     except Exception as e:
         print(f"Failed to download {remote_path}: {e}")
         return False
@@ -123,19 +129,31 @@ def load_dataframe(name: str, option: str, force_download: bool = False) -> Opti
     # Try local cache first
     if not force_download and os.path.exists(cache_path):
         try:
-            return pd.read_parquet(cache_path)
+            df = pd.read_parquet(cache_path)
+            print(f"Loaded {name} for option {option} from local cache")
+            return df
         except Exception as e:
             print(f"Error loading local {cache_path}: {e}")
     
     # Try downloading from HF
     if HF_AVAILABLE:
         temp_path = cache_path + ".tmp"
-        # Try option-specific subfolder first
-        remote_path = f"option_{option}/{actual_name}"
-        if download_from_hub(remote_path, temp_path):
-            if os.path.exists(temp_path):
-                os.rename(temp_path, cache_path)
-                return pd.read_parquet(cache_path)
+        
+        # Try different possible remote paths
+        remote_paths = [
+            f"option_{option}/{actual_name}",  # option_a/etf_data.parquet
+            f"{actual_name}",                   # etf_data.parquet
+            f"{option}_{actual_name}",          # a_etf_data.parquet
+        ]
+        
+        for remote_path in remote_paths:
+            print(f"Trying to download: {remote_path}")
+            if download_from_hub(remote_path, temp_path):
+                if os.path.exists(temp_path):
+                    os.rename(temp_path, cache_path)
+                    df = pd.read_parquet(cache_path)
+                    print(f"Successfully loaded {name} for option {option} from HF")
+                    return df
     
     return None
 
@@ -160,6 +178,7 @@ def load_pickle(name: str, option: str, force_download: bool = False) -> Optiona
     if not force_download and os.path.exists(cache_path):
         try:
             with open(cache_path, 'rb') as f:
+                print(f"Loaded {name} for option {option} from local cache")
                 return pickle.load(f)
         except Exception as e:
             print(f"Error loading local {cache_path}: {e}")
@@ -167,12 +186,22 @@ def load_pickle(name: str, option: str, force_download: bool = False) -> Optiona
     # Try downloading from HF
     if HF_AVAILABLE:
         temp_path = cache_path + ".tmp"
-        remote_path = f"option_{option}/models/{name}.pkl"
-        if download_from_hub(remote_path, temp_path):
-            if os.path.exists(temp_path):
-                os.rename(temp_path, cache_path)
-                with open(cache_path, 'rb') as f:
-                    return pickle.load(f)
+        
+        # Try different possible remote paths
+        remote_paths = [
+            f"option_{option}/models/{name}.pkl",
+            f"option_{option}/{name}.pkl",
+            f"models/{name}.pkl",
+        ]
+        
+        for remote_path in remote_paths:
+            print(f"Trying to download: {remote_path}")
+            if download_from_hub(remote_path, temp_path):
+                if os.path.exists(temp_path):
+                    os.rename(temp_path, cache_path)
+                    with open(cache_path, 'rb') as f:
+                        print(f"Successfully loaded {name} for option {option} from HF")
+                        return pickle.load(f)
     
     return None
 
@@ -217,13 +246,21 @@ def load_json(name: str, option: str, force_download: bool = False) -> Optional[
 # Specific functions for the project
 def get_data(option: str, start_year: int = 2000, force_refresh: bool = False) -> pd.DataFrame:
     """Get the main dataset for an option."""
+    # First try to load the main data file
     df = load_dataframe("data", option, force_download=force_refresh)
-    if df is None:
-        # Try to load with year suffix for backward compatibility
-        df = load_dataframe(f"data_{start_year}", option, force_download=force_refresh)
-        if df is None:
-            raise ValueError(f"Data not found for option {option}, year {start_year}. Run data collection first.")
-    return df
+    
+    if df is not None:
+        print(f"Loaded data for option {option}: {len(df)} rows")
+        return df
+    
+    # If not found, raise error with helpful message
+    raise ValueError(
+        f"Data not found for option {option}. "
+        f"Make sure you have:\n"
+        f"1. Set HF_TOKEN environment variable for authentication\n"
+        f"2. The repository {REPO_ID} exists and contains option_{option}/etf_data.parquet\n"
+        f"3. Run data collection first if data doesn't exist"
+    )
 
 
 def load_predictions(option: str, force_download: bool = False) -> Optional[pd.DataFrame]:
