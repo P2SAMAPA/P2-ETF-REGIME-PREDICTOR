@@ -16,7 +16,7 @@ import numpy as np
 
 # Try to import huggingface_hub
 try:
-    from huggingface_hub import HfApi, hf_hub_download, upload_file, login
+    from huggingface_hub import HfApi, hf_hub_download, upload_file, login, list_repo_files
     HF_AVAILABLE = True
 except ImportError:
     HF_AVAILABLE = False
@@ -32,9 +32,22 @@ HF_TOKEN = os.environ.get("HF_TOKEN")
 if HF_TOKEN and HF_AVAILABLE:
     try:
         login(token=HF_TOKEN)
-        print("Authenticated with Hugging Face Hub")
+        print("✅ Authenticated with Hugging Face Hub")
+        
+        # List all files in the repo to debug
+        api = HfApi()
+        try:
+            files = list_repo_files(REPO_ID)
+            print(f"\n📁 Files found in repository {REPO_ID}:")
+            for f in files:
+                print(f"  - {f}")
+            print()
+        except Exception as e:
+            print(f"⚠️ Could not list repo files: {e}")
     except Exception as e:
-        print(f"Authentication failed: {e}")
+        print(f"❌ Authentication failed: {e}")
+else:
+    print("⚠️ HF_TOKEN not set or HF not available")
 
 
 def _ensure_cache_dir():
@@ -61,9 +74,9 @@ def upload_to_hub(local_path: str, remote_path: str, repo_id: str = REPO_ID):
             path_in_repo=remote_path,
             repo_id=repo_id,
         )
-        print(f"Uploaded {remote_path} to {repo_id}")
+        print(f"✅ Uploaded {remote_path} to {repo_id}")
     except Exception as e:
-        print(f"Failed to upload {remote_path}: {e}")
+        print(f"❌ Failed to upload {remote_path}: {e}")
 
 
 def download_from_hub(remote_path: str, local_path: str, repo_id: str = REPO_ID) -> bool:
@@ -72,7 +85,7 @@ def download_from_hub(remote_path: str, local_path: str, repo_id: str = REPO_ID)
         return False
     
     try:
-        # Try downloading without symlinks
+        print(f"  Attempting: {remote_path}")
         downloaded_path = hf_hub_download(
             repo_id=repo_id,
             filename=remote_path,
@@ -85,10 +98,13 @@ def download_from_hub(remote_path: str, local_path: str, repo_id: str = REPO_ID)
         if downloaded_path != local_path and os.path.exists(downloaded_path):
             import shutil
             shutil.copy2(downloaded_path, local_path)
+            print(f"  ✅ Downloaded to {local_path}")
+        elif os.path.exists(downloaded_path):
+            print(f"  ✅ File exists at {downloaded_path}")
         
-        return os.path.exists(local_path)
+        return os.path.exists(local_path) or os.path.exists(downloaded_path)
     except Exception as e:
-        print(f"Failed to download {remote_path}: {e}")
+        print(f"  ❌ Failed: {str(e)[:100]}")
         return False
 
 
@@ -105,7 +121,7 @@ def save_dataframe(df: pd.DataFrame, name: str, option: str, upload: bool = True
     actual_name = filename_map.get(name, f"{name}.parquet")
     cache_path = _get_cache_path(actual_name, option)
     df.to_parquet(cache_path, index=True)
-    print(f"Saved {name} for option {option} to {cache_path}")
+    print(f"✅ Saved {name} for option {option} to {cache_path}")
     
     if upload:
         # Upload to option-specific subfolder
@@ -130,31 +146,36 @@ def load_dataframe(name: str, option: str, force_download: bool = False) -> Opti
     if not force_download and os.path.exists(cache_path):
         try:
             df = pd.read_parquet(cache_path)
-            print(f"Loaded {name} for option {option} from local cache")
+            print(f"✅ Loaded {name} for option {option} from local cache")
             return df
         except Exception as e:
-            print(f"Error loading local {cache_path}: {e}")
+            print(f"⚠️ Error loading local {cache_path}: {e}")
     
     # Try downloading from HF
     if HF_AVAILABLE:
         temp_path = cache_path + ".tmp"
         
-        # Try different possible remote paths
+        print(f"\n🔍 Searching for {name} (option {option})...")
+        
+        # Try different possible remote paths based on your repo structure
         remote_paths = [
+            # Based on your screenshot showing option_a/ at root
             f"option_{option}/{actual_name}",  # option_a/etf_data.parquet
-            f"{actual_name}",                   # etf_data.parquet
+            f"{option}/{actual_name}",          # a/etf_data.parquet  
             f"{option}_{actual_name}",          # a_etf_data.parquet
+            f"{actual_name}",                   # etf_data.parquet
+            f"option_{option}/data/{actual_name}",  # option_a/data/etf_data.parquet
         ]
         
         for remote_path in remote_paths:
-            print(f"Trying to download: {remote_path}")
             if download_from_hub(remote_path, temp_path):
                 if os.path.exists(temp_path):
                     os.rename(temp_path, cache_path)
                     df = pd.read_parquet(cache_path)
-                    print(f"Successfully loaded {name} for option {option} from HF")
+                    print(f"✅ Successfully loaded {name} for option {option} from HF")
                     return df
     
+    print(f"❌ Could not find {name} for option {option}")
     return None
 
 
@@ -163,7 +184,7 @@ def save_pickle(obj: Any, name: str, option: str, upload: bool = True):
     cache_path = _get_cache_path(f"{name}.pkl", option)
     with open(cache_path, 'wb') as f:
         pickle.dump(obj, f)
-    print(f"Saved {name} for option {option} to {cache_path}")
+    print(f"✅ Saved {name} for option {option} to {cache_path}")
     
     if upload:
         remote_path = f"option_{option}/models/{name}.pkl"
@@ -178,10 +199,10 @@ def load_pickle(name: str, option: str, force_download: bool = False) -> Optiona
     if not force_download and os.path.exists(cache_path):
         try:
             with open(cache_path, 'rb') as f:
-                print(f"Loaded {name} for option {option} from local cache")
+                print(f"✅ Loaded {name} for option {option} from local cache")
                 return pickle.load(f)
         except Exception as e:
-            print(f"Error loading local {cache_path}: {e}")
+            print(f"⚠️ Error loading local {cache_path}: {e}")
     
     # Try downloading from HF
     if HF_AVAILABLE:
@@ -195,12 +216,12 @@ def load_pickle(name: str, option: str, force_download: bool = False) -> Optiona
         ]
         
         for remote_path in remote_paths:
-            print(f"Trying to download: {remote_path}")
+            print(f"  Trying: {remote_path}")
             if download_from_hub(remote_path, temp_path):
                 if os.path.exists(temp_path):
                     os.rename(temp_path, cache_path)
                     with open(cache_path, 'rb') as f:
-                        print(f"Successfully loaded {name} for option {option} from HF")
+                        print(f"✅ Successfully loaded {name} for option {option} from HF")
                         return pickle.load(f)
     
     return None
@@ -211,7 +232,7 @@ def save_json(obj: Dict, name: str, option: str, upload: bool = True):
     cache_path = _get_cache_path(f"{name}.json", option)
     with open(cache_path, 'w') as f:
         json.dump(obj, f, indent=2, default=str)
-    print(f"Saved {name} for option {option} to {cache_path}")
+    print(f"✅ Saved {name} for option {option} to {cache_path}")
     
     if upload:
         remote_path = f"option_{option}/meta/{name}.json"
@@ -250,7 +271,7 @@ def get_data(option: str, start_year: int = 2000, force_refresh: bool = False) -
     df = load_dataframe("data", option, force_download=force_refresh)
     
     if df is not None:
-        print(f"Loaded data for option {option}: {len(df)} rows")
+        print(f"✅ Loaded data for option {option}: {len(df)} rows, columns: {list(df.columns)[:5]}...")
         return df
     
     # If not found, raise error with helpful message
