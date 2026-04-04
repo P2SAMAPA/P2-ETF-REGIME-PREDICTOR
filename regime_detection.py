@@ -1,5 +1,5 @@
 """
-regime_detection.py — P2-ETF-REGIME-PREDICTOR v2
+regime_detection.py - P2-ETF-REGIME-PREDICTOR v2
 =================================================
 Wasserstein k-means regime detection.
 
