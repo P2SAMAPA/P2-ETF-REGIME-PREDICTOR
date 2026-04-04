@@ -1,202 +1,288 @@
-models.py — P2-ETF-REGIME-PREDICTOR v2 (CORRECTED v2)
-=======================================
-Layer 2 Momentum Ranker — rules-based ETF ranking.
-
-Fixes in v2:
-- Added NaN/Inf checking in probability calculation
-- Ensure probabilities sum to 1 and are valid numbers
-- Better handling of edge cases (zero variance, missing data)
-
-MomentumRanker accepts target_etfs at construction time so it works
-correctly for both Option A (FI/Commodities) and Option B (Equity ETFs).
-No hardcoded ETF list anywhere in this file.
-
-Composite momentum score per ETF:
-  40% × RoC 5d
-  30% × RoC 10d
-  20% × RoC 21d
-  10% × RoC 63d
-  15% × OBV accumulation (21d)
-  15% × Breakout score (20d range position)
-
-Scores are Z-normalised cross-sectionally. Top ETF with Z ≥ threshold enters.
+"""
+models.py - P2-ETF-REGIME-PREDICTOR v2 (CORRECTED v2)
+=========================================
+Models for regime detection and momentum ranking.
 """
 
-import logging
-import pickle
-import warnings
 import numpy as np
 import pandas as pd
-from typing import Optional, List, Dict
+from sklearn.cluster import KMeans
+from sklearn.preprocessing import StandardScaler
+from sklearn.decomposition import PCA
+from scipy.stats import zscore
+import warnings
+from typing import Dict, List, Optional, Tuple, Union
 
-warnings.filterwarnings("ignore")
-log = logging.getLogger(__name__)
 
-RANDOM_SEED = 42
+class RegimeDetector:
+    """Detects market regimes using clustering on returns."""
+    
+    def __init__(self, window: int = 20, k: Optional[int] = None):
+        self.window = window
+        self.k = k
+        self.optimal_k_ = None
+        self.scaler = StandardScaler()
+        self.pca = PCA(n_components=0.95)  # Keep 95% of variance
+        self.kmeans = None
+        self.regime_labels_ = None
+        
+    def _create_features(self, df: pd.DataFrame) -> np.ndarray:
+        """Create features for regime detection from return data."""
+        features = []
+        
+        for col in df.columns:
+            # Rolling volatility
+            vol = df[col].rolling(self.window).std()
+            # Rolling mean return
+            mean_ret = df[col].rolling(self.window).mean()
+            # Skewness
+            skew = df[col].rolling(self.window).skew()
+            # Kurtosis
+            kurt = df[col].rolling(self.window).kurt()
+            # Maximum drawdown in window
+            rolling_max = df[col].expanding().max()
+            drawdown = (df[col] - rolling_max) / rolling_max
+            
+            features.extend([vol, mean_ret, skew, kurt, drawdown])
+        
+        # Stack features
+        feature_df = pd.concat(features, axis=1)
+        feature_df = feature_df.dropna()
+        
+        return feature_df.values
+    
+    def _find_optimal_k(self, features: np.ndarray, max_k: int = 10) -> int:
+        """Find optimal number of clusters using elbow method."""
+        from sklearn.metrics import silhouette_score
+        
+        inertias = []
+        silhouette_scores = []
+        
+        for k in range(2, min(max_k + 1, len(features) - 1)):
+            kmeans = KMeans(n_clusters=k, random_state=42, n_init=10)
+            kmeans.fit(features)
+            inertias.append(kmeans.inertia_)
+            
+            if len(np.unique(kmeans.labels_)) > 1:
+                score = silhouette_score(features, kmeans.labels_)
+                silhouette_scores.append(score)
+            else:
+                silhouette_scores.append(-1)
+        
+        # Find k that maximizes silhouette score
+        if silhouette_scores:
+            optimal_k = np.argmax(silhouette_scores) + 2
+        else:
+            optimal_k = 3  # Default
+        
+        return optimal_k
+    
+    def fit(self, df: pd.DataFrame, sweep_mode: bool = False, 
+            wf_mode: bool = False, fixed_k: Optional[int] = None):
+        """Fit the regime detector."""
+        # Create features
+        features = self._create_features(df)
+        
+        # Scale features
+        features_scaled = self.scaler.fit_transform(features)
+        
+        # Apply PCA
+        features_pca = self.pca.fit_transform(features_scaled)
+        
+        # Determine k
+        if fixed_k is not None:
+            self.optimal_k_ = fixed_k
+        elif sweep_mode or wf_mode:
+            # Use default or previously determined k
+            self.optimal_k_ = self.k if self.k else 3
+        else:
+            self.optimal_k_ = self._find_optimal_k(features_pca)
+        
+        # Fit KMeans
+        self.kmeans = KMeans(n_clusters=self.optimal_k_, random_state=42, n_init=10)
+        self.regime_labels_ = self.kmeans.fit_predict(features_pca)
+        
+        return self
+    
+    def predict(self, df: pd.DataFrame) -> np.ndarray:
+        """Predict regimes for new data."""
+        features = self._create_features(df)
+        features_scaled = self.scaler.transform(features)
+        features_pca = self.pca.transform(features_scaled)
+        
+        return self.kmeans.predict(features_pca)
+    
+    def add_regime_to_df(self, df: pd.DataFrame) -> pd.DataFrame:
+        """Add regime predictions to dataframe."""
+        # Get regime for each date
+        regimes = self.predict(df)
+        
+        # Create regime dataframe aligned with original index
+        regime_df = pd.DataFrame(regimes, index=df.index[-len(regimes):], columns=["Regime"])
+        
+        # Merge with original dataframe
+        result = df.copy()
+        result["Regime"] = regime_df["Regime"]
+        
+        # Add regime names
+        regime_names = {
+            0: "Low Volatility",
+            1: "High Volatility",
+            2: "Trending",
+            3: "Mean Reverting",
+            4: "Crisis"
+        }
+        result["Regime_Name"] = result["Regime"].map(lambda x: regime_names.get(x, f"Regime {x}"))
+        
+        return result
 
 
 class MomentumRanker:
-    """
-    Rules-based ETF ranking using Rate-of-Change momentum.
-
-    Parameters
-    ----------
-    target_etfs : list of ETF tickers to rank. Must match the ETFs
-        present in the dataset (i.e. Option A or Option B list).
-        Stored at fit time and used in all predict calls.
-    """
-
-    ROC_WEIGHTS = {5: 0.40, 10: 0.30, 21: 0.20, 63: 0.10}
-    OBV_WEIGHT = 0.15
-    BREAKOUT_WEIGHT = 0.15
-    MOMENTUM_WEIGHT = 0.70
-
-    def __init__(self, target_etfs: Optional[List[str]] = None):
-        # CORRECTED: No default fallback — must provide ETFs explicitly
-        if target_etfs is None:
-            raise ValueError(
-                "target_etfs must be provided explicitly. "
-                "Use cfg.OPTION_A_ETFS or cfg.OPTION_B_ETFS"
-            )
-        self.target_etfs_: List[str] = list(target_etfs)
-        self.fitted_ = False
-
-    def fit(self, df: pd.DataFrame, **kwargs) -> "MomentumRanker":
-        """
-        Fit the ranker. Validates that expected feature columns exist
-        for each ETF in target_etfs. No ML — pure rules-based.
-        """
-        missing = []
-        for etf in self.target_etfs_:
-            if f"{etf}_RoC5d" not in df.columns:
-                missing.append(etf)
-        if missing:
-            log.warning(f"MomentumRanker: missing RoC5d columns for: {missing}. "
-                        f"These ETFs will score 0.")
-        self.fitted_ = True
-        log.info(f"MomentumRanker fitted — universe: {self.target_etfs_}")
+    """Ranks assets by momentum within each regime."""
+    
+    def __init__(self, lookback: int = 63, target_etfs: List[str] = None):
+        self.lookback = lookback
+        self.target_etfs = target_etfs or []
+        self.regime_rankings_ = {}
+        self.regime_weights_ = {}
+        
+    def _calculate_momentum(self, df: pd.DataFrame, lookback: int) -> pd.DataFrame:
+        """Calculate momentum scores for each asset."""
+        # Calculate returns over lookback period
+        momentum = df.pct_change(lookback)
+        
+        # Calculate Sharpe-like ratio (return / volatility)
+        vol = df.rolling(lookback).std()
+        sharpe = momentum / vol
+        
+        # Calculate trend strength (linear regression slope)
+        def trend_strength(series):
+            if len(series) < lookback:
+                return np.nan
+            x = np.arange(len(series))
+            slope = np.polyfit(x, series, 1)[0]
+            return slope / series.std() if series.std() > 0 else 0
+        
+        trend = df.rolling(lookback).apply(trend_strength)
+        
+        # Combine metrics
+        momentum_score = 0.4 * momentum + 0.3 * sharpe + 0.3 * trend
+        
+        return momentum_score
+    
+    def fit(self, df: pd.DataFrame):
+        """Fit the ranker for each regime."""
+        # Get unique regimes
+        if "Regime" not in df.columns:
+            raise ValueError("DataFrame must have 'Regime' column. Run RegimeDetector first.")
+        
+        regimes = df["Regime"].unique()
+        
+        for regime in regimes:
+            regime_df = df[df["Regime"] == regime]
+            
+            # Get ETF return columns
+            ret_cols = [f"{etf}_Ret" for etf in self.target_etfs if f"{etf}_Ret" in df.columns]
+            
+            if len(regime_df) < self.lookback:
+                # Not enough data, use equal weights
+                self.regime_rankings_[regime] = pd.Series(0.5, index=self.target_etfs)
+                self.regime_weights_[regime] = pd.Series(1/len(self.target_etfs), index=self.target_etfs)
+                continue
+            
+            # Calculate momentum scores
+            momentum_scores = self._calculate_momentum(regime_df[ret_cols], self.lookback)
+            
+            # Get latest momentum
+            latest_scores = momentum_scores.iloc[-1]
+            
+            # Normalize to probabilities
+            scores_positive = latest_scores - latest_scores.min() + 0.01
+            probs = scores_positive / scores_positive.sum()
+            
+            # Store rankings and weights
+            self.regime_rankings_[regime] = latest_scores.sort_values(ascending=False)
+            self.regime_weights_[regime] = probs
+        
         return self
-
-    def score_row(self, row: pd.Series) -> Dict[str, float]:
-        """
-        Compute momentum score per ETF for a single row.
-        Returns dict {etf: score} — higher = stronger momentum.
-        """
-        scores = {}
-        for etf in self.target_etfs_:
-            # 1. RoC composite
-            roc_score = 0.0
-            for n, w in self.ROC_WEIGHTS.items():
-                val = float(row.get(f"{etf}_RoC{n}d", 0.0) or 0.0)
-                # Handle NaN/Inf
-                if not np.isfinite(val):
-                    val = 0.0
-                roc_score += w * val
-
-            # 2. OBV normalised
-            obv_raw = float(row.get(f"{etf}_OBV21d", 0.0) or 0.0)
-            if not np.isfinite(obv_raw):
-                obv_norm = 0.0
-            else:
-                obv_norm = np.tanh(obv_raw / (abs(obv_raw) + 1e-6)) if obv_raw != 0 else 0.0
-
-            # 3. Breakout score (0–1, 1 = at 20d high)
-            breakout = float(row.get(f"{etf}_Breakout20d", 0.5) or 0.5)
-            if not np.isfinite(breakout):
-                breakout = 0.5
-
-            scores[etf] = (
-                self.MOMENTUM_WEIGHT * roc_score +
-                self.OBV_WEIGHT * obv_norm +
-                self.BREAKOUT_WEIGHT * (breakout - 0.5)
-            )
-        return scores
-
-    def predict(self, row: pd.Series) -> pd.DataFrame:
-        """
-        Returns DataFrame indexed by ETF with columns:
-        Rank_Score, Conviction_P, P_Adjusted, Disagree, Source
-
-        CORRECTED: Conviction_P now properly represents relative
-        probability using softmax transformation instead of clamped linear.
-        Includes NaN/Inf protection.
-        """
-        scores = self.score_row(row)
-        vals = np.array(list(scores.values()))
-
-        # CORRECTED: Check for invalid values
-        if not np.all(np.isfinite(vals)):
-            log.warning(f"Non-finite values in scores: {vals}")
-            vals = np.nan_to_num(vals, nan=0.0, posinf=1.0, neginf=-1.0)
-
-        # CORRECTED: Use softmax for proper probability distribution
-        # This ensures probabilities sum to 1 and reflect relative strength
-        if len(vals) > 0:
-            # Subtract max for numerical stability
-            max_val = np.max(vals)
-            exp_vals = np.exp(vals - max_val)
-            probs = exp_vals / (np.sum(exp_vals) + 1e-9)
+    
+    def predict(self, row: pd.Series) -> Dict:
+        """Predict rankings for a single row."""
+        regime = row.get("Regime", 0)
+        
+        if regime in self.regime_rankings_:
+            rankings = self.regime_rankings_[regime]
+            weights = self.regime_weights_[regime]
         else:
-            probs = np.ones(len(self.target_etfs_)) / len(self.target_etfs_)
-
-        # Ensure no NaN/Inf in probabilities
-        if not np.all(np.isfinite(probs)):
-            log.warning(f"Non-finite values in probabilities: {probs}")
-            probs = np.nan_to_num(probs, nan=1.0/len(probs), posinf=1.0, neginf=0.0)
-            # Renormalize
-            probs = probs / (np.sum(probs) + 1e-9)
-
-        mean, std = vals.mean(), vals.std()
-        if std < 1e-9 or not np.isfinite(std):
-            std = 1.0  # Avoid division by zero
-
-        rows = []
-        for i, etf in enumerate(self.target_etfs_):
-            s = scores[etf]
-            z_score = (s - mean) / std
-            # Ensure z_score is finite
-            if not np.isfinite(z_score):
-                z_score = 0.0
-
-            p_val = probs[i]
-            # Final safety check
-            if not np.isfinite(p_val):
-                p_val = 1.0 / len(self.target_etfs_)
-
-            rows.append({
-                "ETF": etf,
-                "Rank_Score": float(s),
-                # CORRECTED: Proper probability using softmax
-                "Conviction_P": float(np.clip(p_val, 0.001, 0.999)),
-                "P_Adjusted": float(z_score),
-                "Disagree": False,
-                "Source": "momentum",
-            })
-        return pd.DataFrame(rows).set_index("ETF")
-
+            # Default to equal weights
+            rankings = pd.Series(0, index=self.target_etfs)
+            weights = pd.Series(1/len(self.target_etfs), index=self.target_etfs)
+        
+        # Get top pick
+        top_pick = rankings.index[0] if len(rankings) > 0 else None
+        
+        return {
+            "Rank_Score": rankings,
+            "Weights": weights,
+            "Top_Pick": top_pick,
+            "Regime": regime
+        }
+    
     def predict_all_history(self, df: pd.DataFrame) -> pd.DataFrame:
-        """
-        Run predictions for every row in df — used for backtesting and WF.
-        Returns DataFrame indexed by Date with columns:
-        {ETF}_P, {ETF}_PA, {ETF}_RS, {ETF}_Disagree for each ETF.
-        """
-        rows = []
-        for idx, row in df.iterrows():
-            regime = int(row.get("Regime", 0)) if pd.notna(row.get("Regime")) else 0
-            preds = self.predict(row)
-            entry = {"Date": idx, "Regime": regime}
-            for etf in self.target_etfs_:
-                if etf in preds.index:
-                    entry[f"{etf}_P"] = preds.loc[etf, "Conviction_P"]
-                    entry[f"{etf}_PA"] = preds.loc[etf, "P_Adjusted"]
-                    entry[f"{etf}_RS"] = preds.loc[etf, "Rank_Score"]
-                    entry[f"{etf}_Disagree"] = False
-            rows.append(entry)
-        return pd.DataFrame(rows).set_index("Date")
+        """Generate predictions for entire history."""
+        predictions = []
+        
+        for idx in range(self.lookback, len(df)):
+            row = df.iloc[idx]
+            pred = self.predict(row)
+            
+            # Create prediction row
+            pred_row = pd.Series(index=df.index[idx])
+            for etf in self.target_etfs:
+                pred_row[f"{etf}_Prob"] = pred["Weights"].get(etf, 0)
+            pred_row["Top_Pick"] = pred["Top_Pick"]
+            pred_row["Regime"] = pred["Regime"]
+            
+            predictions.append(pred_row)
+        
+        if predictions:
+            return pd.DataFrame(predictions)
+        else:
+            return pd.DataFrame()
 
-    def to_bytes(self) -> bytes:
-        return pickle.dumps(self)
 
-    @staticmethod
-    def from_bytes(data: bytes) -> "MomentumRanker":
-        return pickle.loads(data)
+def calculate_conviction_z(probabilities: np.ndarray) -> Tuple[float, str]:
+    """
+    Calculate conviction score based on probability distribution.
+    Returns Z-score and label (High/Medium/Low).
+    """
+    if len(probabilities) == 0:
+        return 0.0, "Low"
+    
+    # Calculate entropy of distribution (lower entropy = higher conviction)
+    probs = np.array(probabilities)
+    probs = probs / (probs.sum() + 1e-10)  # Normalize
+    
+    # Avoid log(0)
+    probs = np.clip(probs, 1e-10, 1.0)
+    entropy = -np.sum(probs * np.log(probs))
+    max_entropy = np.log(len(probs))
+    
+    # Convert to Z-score (1 - normalized entropy)
+    if max_entropy > 0:
+        conviction = 1 - (entropy / max_entropy)
+    else:
+        conviction = 0
+    
+    # Scale to Z-score (0-3 range)
+    z_score = conviction * 3
+    
+    # Label
+    if z_score > 2.0:
+        label = "High"
+    elif z_score > 1.0:
+        label = "Medium"
+    else:
+        label = "Low"
+    
+    return z_score, label
