@@ -1,4 +1,5 @@
-strategy.py — P2-ETF-REGIME-PREDICTOR v2 (CORRECTED)
+"""
+strategy.py - P2-ETF-REGIME-PREDICTOR v2 (CORRECTED)
 =========================================
 Signal execution, backtesting, and performance metrics.
 
