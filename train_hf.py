@@ -24,6 +24,7 @@ import sys
 import argparse
 import pickle
 import logging
+import json  # ADDED: json import was missing
 from typing import Optional
 
 import numpy as np
@@ -292,8 +293,6 @@ def run_single_year(start_year: int, option: str,
     save_wf_predictions(merged, option)
     log.info(f"{_label(option)}: single‑window {start_year} saved ({len(fold_preds)} rows)")
     return fold_preds
-
-import json
 
 def run_sweep(option: str, years: Optional[list] = None,
               force_refresh: bool = False) -> None:
