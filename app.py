@@ -1,10 +1,10 @@
 """
-app.py — P2-ETF-REGIME-PREDICTOR v2.3
+app.py - P2-ETF-REGIME-PREDICTOR v2.3
 =======================================
 Streamlit UI.
 
 Fixes vs v2:
-  1. st.set_page_config() is the VERY FIRST Streamlit call — before all
+  1. st.set_page_config() is the VERY FIRST Streamlit call -- before all
      imports, env-var checks, and st.error()/st.stop() calls.
   2. All local module imports (data_manager_hf, regime_detection, etc.)
      are deferred inside functions — eliminates circular import.
@@ -12,8 +12,8 @@ Fixes vs v2:
      before the page is configured.
 
 Structure:
-  Option A — FI / Commodities ETFs  → Single Year | Consensus
-  Option B — Equity ETFs            → Single Year | Consensus
+  Option A — FI / Commodities ETFs  -> Single Year | Consensus
+  Option B — Equity ETFs            -> Single Year | Consensus
 """
 
 import os
@@ -488,7 +488,7 @@ def render_single_year_tab(option: str, target_etfs: list, params: dict):
     with st.expander("🔧 Debug info (click to expand)"):
         st.code(f"Columns: {list(wf_preds.columns)}")
         st.write(f"Shape: {wf_preds.shape}")
-        st.write(f"Index range: {wf_preds.index.min()} → {wf_preds.index.max()}")
+        st.write(f"Index range: {wf_preds.index.min()} -> {wf_preds.index.max()}")
         if "train_start" in wf_preds.columns:
             st.write(f"✅ 'train_start' values: {sorted(wf_preds['train_start'].unique())}")
         else:
@@ -554,7 +554,7 @@ def render_single_year_tab(option: str, target_etfs: list, params: dict):
 
     st.success(
         f"Training: **{selected_train_start} – 2024** | "
-        f"Test: **{pred_df.index[0].date()} → {pred_df.index[-1].date()}** "
+        f"Test: **{pred_df.index[0].date()} -> {pred_df.index[-1].date()}** "
         f"({len(pred_df)} days)"
     )
     st.divider()
