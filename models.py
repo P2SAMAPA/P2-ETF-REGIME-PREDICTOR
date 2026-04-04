@@ -1,4 +1,5 @@
-models.py — P2-ETF-REGIME-PREDICTOR v2 (CORRECTED)
+"""
+models.py - P2-ETF-REGIME-PREDICTOR v2 (CORRECTED)
 =======================================
 Layer 2 Momentum Ranker — rules-based ETF ranking.
 
