@@ -1,7 +1,11 @@
-"""
-models.py - P2-ETF-REGIME-PREDICTOR v2 (CORRECTED)
+models.py — P2-ETF-REGIME-PREDICTOR v2 (CORRECTED v2)
 =======================================
 Layer 2 Momentum Ranker — rules-based ETF ranking.
+
+Fixes in v2:
+- Added NaN/Inf checking in probability calculation
+- Ensure probabilities sum to 1 and are valid numbers
+- Better handling of edge cases (zero variance, missing data)
 
 MomentumRanker accepts target_etfs at construction time so it works
 correctly for both Option A (FI/Commodities) and Option B (Equity ETFs).
@@ -27,9 +31,6 @@ from typing import Optional, List, Dict
 
 warnings.filterwarnings("ignore")
 log = logging.getLogger(__name__)
-
-# REMOVED: No default ETF list — must be provided explicitly
-# This prevents accidental use of wrong ETF universe
 
 RANDOM_SEED = 42
 
@@ -87,14 +88,22 @@ class MomentumRanker:
             roc_score = 0.0
             for n, w in self.ROC_WEIGHTS.items():
                 val = float(row.get(f"{etf}_RoC{n}d", 0.0) or 0.0)
+                # Handle NaN/Inf
+                if not np.isfinite(val):
+                    val = 0.0
                 roc_score += w * val
 
             # 2. OBV normalised
             obv_raw = float(row.get(f"{etf}_OBV21d", 0.0) or 0.0)
-            obv_norm = np.tanh(obv_raw / (abs(obv_raw) + 1e-6)) if obv_raw != 0 else 0.0
+            if not np.isfinite(obv_raw):
+                obv_norm = 0.0
+            else:
+                obv_norm = np.tanh(obv_raw / (abs(obv_raw) + 1e-6)) if obv_raw != 0 else 0.0
 
             # 3. Breakout score (0–1, 1 = at 20d high)
             breakout = float(row.get(f"{etf}_Breakout20d", 0.5) or 0.5)
+            if not np.isfinite(breakout):
+                breakout = 0.5
 
             scores[etf] = (
                 self.MOMENTUM_WEIGHT * roc_score +
@@ -110,31 +119,56 @@ class MomentumRanker:
 
         CORRECTED: Conviction_P now properly represents relative
         probability using softmax transformation instead of clamped linear.
+        Includes NaN/Inf protection.
         """
         scores = self.score_row(row)
         vals = np.array(list(scores.values()))
+
+        # CORRECTED: Check for invalid values
+        if not np.all(np.isfinite(vals)):
+            log.warning(f"Non-finite values in scores: {vals}")
+            vals = np.nan_to_num(vals, nan=0.0, posinf=1.0, neginf=-1.0)
 
         # CORRECTED: Use softmax for proper probability distribution
         # This ensures probabilities sum to 1 and reflect relative strength
         if len(vals) > 0:
             # Subtract max for numerical stability
-            exp_vals = np.exp(vals - np.max(vals))
+            max_val = np.max(vals)
+            exp_vals = np.exp(vals - max_val)
             probs = exp_vals / (np.sum(exp_vals) + 1e-9)
         else:
             probs = np.ones(len(self.target_etfs_)) / len(self.target_etfs_)
 
+        # Ensure no NaN/Inf in probabilities
+        if not np.all(np.isfinite(probs)):
+            log.warning(f"Non-finite values in probabilities: {probs}")
+            probs = np.nan_to_num(probs, nan=1.0/len(probs), posinf=1.0, neginf=0.0)
+            # Renormalize
+            probs = probs / (np.sum(probs) + 1e-9)
+
         mean, std = vals.mean(), vals.std()
+        if std < 1e-9 or not np.isfinite(std):
+            std = 1.0  # Avoid division by zero
 
         rows = []
         for i, etf in enumerate(self.target_etfs_):
             s = scores[etf]
-            z_score = (s - mean) / (std + 1e-9) if std > 1e-9 else 0.0
+            z_score = (s - mean) / std
+            # Ensure z_score is finite
+            if not np.isfinite(z_score):
+                z_score = 0.0
+
+            p_val = probs[i]
+            # Final safety check
+            if not np.isfinite(p_val):
+                p_val = 1.0 / len(self.target_etfs_)
+
             rows.append({
                 "ETF": etf,
                 "Rank_Score": float(s),
                 # CORRECTED: Proper probability using softmax
-                "Conviction_P": float(np.clip(probs[i], 0.001, 0.999)),
-                "P_Adjusted": float(z_score),  # Z-score for threshold checks
+                "Conviction_P": float(np.clip(p_val, 0.001, 0.999)),
+                "P_Adjusted": float(z_score),
                 "Disagree": False,
                 "Source": "momentum",
             })
