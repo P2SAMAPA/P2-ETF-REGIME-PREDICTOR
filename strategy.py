@@ -1,4 +1,5 @@
-strategy.py — P2-ETF-REGIME-PREDICTOR v2 (CORRECTED v2)
+"""
+strategy.py - P2-ETF-REGIME-PREDICTOR v2 (CORRECTED v2)
 =========================================
 Signal execution, backtesting, and performance metrics.
 
@@ -473,7 +474,6 @@ def build_signal_row(next_date, next_signal, conviction_z, conviction_label,
     for i, etf in enumerate(target_etfs):
         row[f"{etf}_P"] = round(p_clean[i], 4)
     return pd.DataFrame([row], index=[next_date])
-
 
 def _next_trading_day(last_date: pd.Timestamp) -> pd.Timestamp:
     try:
