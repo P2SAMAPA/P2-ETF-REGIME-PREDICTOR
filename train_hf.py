@@ -1,4 +1,4 @@
-train_hf.py — P2-ETF-REGIME-PREDICTOR v2 (CORRECTED v2)
+# train_hf.py - P2-ETF-REGIME-PREDICTOR v2 (CORRECTED v2)
 =========================================
 Training pipeline for Option A (FI/Commodities) and Option B (Equity ETFs).
 
