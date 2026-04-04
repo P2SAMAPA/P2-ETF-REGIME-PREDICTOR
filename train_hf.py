@@ -1,13 +1,12 @@
-"""
-train_hf.py - P2-ETF-REGIME-PREDICTOR v2 (CORRECTED)
+train_hf.py — P2-ETF-REGIME-PREDICTOR v2 (CORRECTED v2)
 =========================================
 Training pipeline for Option A (FI/Commodities) and Option B (Equity ETFs).
 
-New shrinking-window scheme:
-- Fixed test start (e.g., 2025-01-01)
-- Test end is dynamic: always up to the latest date in the dataset (YTD)
-- Multiple training windows with fixed end (2024-12-31) and varying start years
-- Predictions for the same test period from each window are stored with a train_start column
+Fixes in v2:
+- Fixed NaN values in ETF probabilities causing JSON serialization errors
+- Added custom JSON encoder for numpy types
+- Fixed test data usage in sweep (was using train data)
+- Added proper NaN handling in sweep results
 
 Usage:
  python train_hf.py --option a # Full train all windows (Option A)
@@ -16,7 +15,7 @@ Usage:
  python train_hf.py --option a --wfcv # Incremental walk-forward CV (fast path)
  python train_hf.py --option a --sweep # Consensus sweep across all windows
  python train_hf.py --option a --sweep-year 2008 # Sweep for one window (train start year)
- python train_hf.py --option a --single-year 2008 # Single-window WF for a specific train start year
+ python train_hf.py --option a --single-year 2008 # Single‑window WF for a specific train start year
 """
 
 import os
@@ -46,6 +45,43 @@ from strategy import execute_strategy, calculate_metrics, compute_sweep_z
 logging.basicConfig(level=logging.INFO,
                     format="%(asctime)s [%(levelname)s] %(message)s")
 log = logging.getLogger(__name__)
+
+
+class NumpyEncoder(json.JSONEncoder):
+    """Custom JSON encoder to handle numpy types and NaN values."""
+    def default(self, obj):
+        if isinstance(obj, np.integer):
+            return int(obj)
+        elif isinstance(obj, np.floating):
+            if np.isnan(obj) or np.isinf(obj):
+                return None  # Convert NaN/Inf to None (null in JSON)
+            return float(obj)
+        elif isinstance(obj, np.ndarray):
+            return obj.tolist()
+        elif isinstance(obj, (np.bool_, bool)):
+            return bool(obj)
+        return super().default(obj)
+
+
+def _clean_numpy_values(obj):
+    """Recursively clean numpy values and NaN from nested structures."""
+    if isinstance(obj, dict):
+        return {k: _clean_numpy_values(v) for k, v in obj.items()}
+    elif isinstance(obj, list):
+        return [_clean_numpy_values(v) for v in obj]
+    elif isinstance(obj, np.integer):
+        return int(obj)
+    elif isinstance(obj, np.floating):
+        if np.isnan(obj) or np.isinf(obj):
+            return None
+        return float(obj)
+    elif isinstance(obj, np.ndarray):
+        return [_clean_numpy_values(v) for v in obj.tolist()]
+    elif isinstance(obj, float):
+        if np.isnan(obj) or np.isinf(obj):
+            return None
+        return obj
+    return obj
 
 
 def _target_etfs(option: str) -> list:
@@ -212,7 +248,7 @@ def run_single_year(start_year: int, option: str,
         log.error(f"{_label(option)}: no window for train start year {start_year}")
         return None
 
-    log.info(f"{_label(option)}: single-window for train start {start_year}...")
+    log.info(f"{_label(option)}: single‑window for train start {start_year}...")
     df = get_data(option=option, start_year=cfg.START_YEAR_DEFAULT,
                   force_refresh=force_refresh)
 
@@ -253,8 +289,10 @@ def run_single_year(start_year: int, option: str,
         merged = fold_preds
 
     save_wf_predictions(merged, option)
-    log.info(f"{_label(option)}: single-window {start_year} saved ({len(fold_preds)} rows)")
+    log.info(f"{_label(option)}: single‑window {start_year} saved ({len(fold_preds)} rows)")
     return fold_preds
+
+import json
 
 def run_sweep(option: str, years: Optional[list] = None,
               force_refresh: bool = False) -> None:
@@ -318,7 +356,7 @@ def run_sweep(option: str, years: Optional[list] = None,
         ret_df = test_df.loc[common, ret_cols]
         pred_aligned = predictions.loc[common]
 
-        # Risk-free rate from test period
+        # Risk‑free rate from test period
         rf_rate = (float(test_df["DTB3"].iloc[-1] / 100)
                    if "DTB3" in test_df.columns else cfg.RISK_FREE_RATE)
 
@@ -343,13 +381,25 @@ def run_sweep(option: str, years: Optional[list] = None,
             sweep_z, sweep_label = compute_sweep_z(strat_rets_clean, rf_rate=rf_rate)
         except Exception as e:
             log.warning(f"{_label(option)}: strategy failed for window {start_year}: {e}")
+            import traceback
+            traceback.print_exc()
             metrics = {}
             next_signal = "CASH"
             sweep_z = 0.0
             sweep_label = "Low"
+            last_p = np.full(len(etfs), 0.5)  # Default equal probabilities
 
         regime_name = (test_df["Regime_Name"].iloc[-1]
                        if "Regime_Name" in test_df.columns else "Unknown")
+
+        # CORRECTED: Handle NaN values in last_p before creating etf_probs
+        etf_probs = {}
+        for i, etf in enumerate(etfs):
+            p_val = float(last_p[i]) if i < len(last_p) else 0.5
+            # Handle NaN and Inf
+            if np.isnan(p_val) or np.isinf(p_val):
+                p_val = 0.5  # Default to equal weight
+            etf_probs[etf] = round(p_val, 4)
 
         result = {
             "signal": next_signal,
@@ -359,9 +409,12 @@ def run_sweep(option: str, years: Optional[list] = None,
             "max_dd": round(metrics.get("max_dd", 0.0), 4),
             "conviction": sweep_label,
             "regime": str(regime_name),
-            # ADDED: Include ETF probabilities for UI display
-            "etf_probs": {etf: round(float(last_p[i]), 4) for i, etf in enumerate(etfs)},
+            "etf_probs": etf_probs,
         }
+
+        # Clean any remaining numpy/NaN values before saving
+        result = _clean_numpy_values(result)
+
         save_sweep_result(result, start_year, option)
         log.info(f"{_label(option)}: sweep window {start_year} — "
                  f"signal={next_signal}, "
@@ -386,7 +439,7 @@ def main():
     parser.add_argument("--sweep-year", type=int, default=None,
                         help="Run sweep for a single train start year only")
     parser.add_argument("--single-year", type=int, default=None,
-                        help="Run single-window walk-forward for a specific train start year")
+                        help="Run single‑window walk‑forward for a specific train start year")
 
     args = parser.parse_args()
     option = args.option.lower()
