@@ -23,8 +23,8 @@ except ImportError:
     print("Warning: huggingface_hub not installed. Local mode only.")
 
 
-# Configuration
-REPO_ID = "your-username/P2-ETF-REPO"  # Update with your actual repo
+# Configuration - UPDATE THIS WITH YOUR ACTUAL REPO
+REPO_ID = "P2SAMAPA/p2-etf-regime-predictor"  # Your actual repo
 LOCAL_CACHE = "./hf_cache"
 
 
@@ -63,13 +63,24 @@ def download_from_hub(remote_path: str, local_path: str, repo_id: str = REPO_ID)
         return False
     
     try:
-        hf_hub_download(
-            repo_id=repo_id,
-            filename=remote_path,
-            local_dir=os.path.dirname(local_path),
-            local_dir_use_symlinks=False,
-        )
-        return os.path.exists(local_path)
+        # Try downloading from option-specific subfolder
+        try:
+            hf_hub_download(
+                repo_id=repo_id,
+                filename=f"option_{option}/{remote_path}",
+                local_dir=os.path.dirname(local_path),
+                local_dir_use_symlinks=False,
+            )
+            return os.path.exists(local_path)
+        except:
+            # Try root directory
+            hf_hub_download(
+                repo_id=repo_id,
+                filename=remote_path,
+                local_dir=os.path.dirname(local_path),
+                local_dir_use_symlinks=False,
+            )
+            return os.path.exists(local_path)
     except Exception as e:
         print(f"Failed to download {remote_path}: {e}")
         return False
@@ -77,17 +88,37 @@ def download_from_hub(remote_path: str, local_path: str, repo_id: str = REPO_ID)
 
 def save_dataframe(df: pd.DataFrame, name: str, option: str, upload: bool = True):
     """Save a dataframe to cache and optionally upload to HF."""
-    cache_path = _get_cache_path(f"{name}.parquet", option)
+    # Map logical names to actual filenames in repo
+    filename_map = {
+        "data": "etf_data.parquet",
+        "predictions": "mom_pred_history.parquet",
+        "wf_predictions": "wf_mom_pred_history.parquet",
+        "signals": "signals.parquet",
+    }
+    
+    actual_name = filename_map.get(name, f"{name}.parquet")
+    cache_path = _get_cache_path(actual_name, option)
     df.to_parquet(cache_path, index=True)
     print(f"Saved {name} for option {option} to {cache_path}")
     
     if upload:
-        upload_to_hub(cache_path, f"{option}_{name}.parquet")
+        # Upload to option-specific subfolder
+        remote_path = f"option_{option}/{actual_name}"
+        upload_to_hub(cache_path, remote_path)
 
 
 def load_dataframe(name: str, option: str, force_download: bool = False) -> Optional[pd.DataFrame]:
     """Load a dataframe from cache or HF."""
-    cache_path = _get_cache_path(f"{name}.parquet", option)
+    # Map logical names to actual filenames in repo
+    filename_map = {
+        "data": "etf_data.parquet",
+        "predictions": "mom_pred_history.parquet",
+        "wf_predictions": "wf_mom_pred_history.parquet",
+        "signals": "signals.parquet",
+    }
+    
+    actual_name = filename_map.get(name, f"{name}.parquet")
+    cache_path = _get_cache_path(actual_name, option)
     
     # Try local cache first
     if not force_download and os.path.exists(cache_path):
@@ -99,7 +130,9 @@ def load_dataframe(name: str, option: str, force_download: bool = False) -> Opti
     # Try downloading from HF
     if HF_AVAILABLE:
         temp_path = cache_path + ".tmp"
-        if download_from_hub(f"{option}_{name}.parquet", temp_path):
+        # Try option-specific subfolder first
+        remote_path = f"option_{option}/{actual_name}"
+        if download_from_hub(remote_path, temp_path):
             if os.path.exists(temp_path):
                 os.rename(temp_path, cache_path)
                 return pd.read_parquet(cache_path)
@@ -115,7 +148,8 @@ def save_pickle(obj: Any, name: str, option: str, upload: bool = True):
     print(f"Saved {name} for option {option} to {cache_path}")
     
     if upload:
-        upload_to_hub(cache_path, f"{option}_{name}.pkl")
+        remote_path = f"option_{option}/models/{name}.pkl"
+        upload_to_hub(cache_path, remote_path)
 
 
 def load_pickle(name: str, option: str, force_download: bool = False) -> Optional[Any]:
@@ -133,7 +167,8 @@ def load_pickle(name: str, option: str, force_download: bool = False) -> Optiona
     # Try downloading from HF
     if HF_AVAILABLE:
         temp_path = cache_path + ".tmp"
-        if download_from_hub(f"{option}_{name}.pkl", temp_path):
+        remote_path = f"option_{option}/models/{name}.pkl"
+        if download_from_hub(remote_path, temp_path):
             if os.path.exists(temp_path):
                 os.rename(temp_path, cache_path)
                 with open(cache_path, 'rb') as f:
@@ -150,7 +185,8 @@ def save_json(obj: Dict, name: str, option: str, upload: bool = True):
     print(f"Saved {name} for option {option} to {cache_path}")
     
     if upload:
-        upload_to_hub(cache_path, f"{option}_{name}.json")
+        remote_path = f"option_{option}/meta/{name}.json"
+        upload_to_hub(cache_path, remote_path)
 
 
 def load_json(name: str, option: str, force_download: bool = False) -> Optional[Dict]:
@@ -168,7 +204,8 @@ def load_json(name: str, option: str, force_download: bool = False) -> Optional[
     # Try downloading from HF
     if HF_AVAILABLE:
         temp_path = cache_path + ".tmp"
-        if download_from_hub(f"{option}_{name}.json", temp_path):
+        remote_path = f"option_{option}/meta/{name}.json"
+        if download_from_hub(remote_path, temp_path):
             if os.path.exists(temp_path):
                 os.rename(temp_path, cache_path)
                 with open(cache_path, 'r') as f:
@@ -180,9 +217,12 @@ def load_json(name: str, option: str, force_download: bool = False) -> Optional[
 # Specific functions for the project
 def get_data(option: str, start_year: int = 2000, force_refresh: bool = False) -> pd.DataFrame:
     """Get the main dataset for an option."""
-    df = load_dataframe(f"data_{start_year}", option, force_download=force_refresh)
+    df = load_dataframe("data", option, force_download=force_refresh)
     if df is None:
-        raise ValueError(f"Data not found for option {option}, year {start_year}. Run data collection first.")
+        # Try to load with year suffix for backward compatibility
+        df = load_dataframe(f"data_{start_year}", option, force_download=force_refresh)
+        if df is None:
+            raise ValueError(f"Data not found for option {option}, year {start_year}. Run data collection first.")
     return df
 
 
@@ -218,22 +258,22 @@ def save_signals(df: pd.DataFrame, option: str, upload: bool = True):
 
 def load_detector(option: str, force_download: bool = False) -> Optional[bytes]:
     """Load the regime detector for an option."""
-    return load_pickle("detector", option, force_download=force_download)
+    return load_pickle("regime_detector", option, force_download=force_download)
 
 
 def save_detector(detector, option: str, upload: bool = True):
     """Save the regime detector for an option."""
-    save_pickle(detector, "detector", option, upload=upload)
+    save_pickle(detector, "regime_detector", option, upload=upload)
 
 
 def save_ranker(ranker, option: str, upload: bool = True):
     """Save the momentum ranker for an option."""
-    save_pickle(ranker, "ranker", option, upload=upload)
+    save_pickle(ranker, "momentum_ranker", option, upload=upload)
 
 
 def load_ranker(option: str, force_download: bool = False):
     """Load the momentum ranker for an option."""
-    return load_pickle("ranker", option, force_download=force_download)
+    return load_pickle("momentum_ranker", option, force_download=force_download)
 
 
 def save_feature_list(features: list, option: str, upload: bool = True):
@@ -260,7 +300,7 @@ def load_sweep_result(year: int, option: str, force_download: bool = False) -> O
 def list_available_data(option: str) -> Dict[str, bool]:
     """Check what data is available for an option."""
     return {
-        "data": load_dataframe(f"data_{cfg.START_YEAR_DEFAULT}", option) is not None,
+        "data": load_dataframe("data", option) is not None,
         "predictions": load_predictions(option) is not None,
         "wf_predictions": load_wf_predictions(option) is not None,
         "signals": load_signals(option) is not None,
