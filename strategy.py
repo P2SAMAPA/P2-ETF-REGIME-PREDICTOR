@@ -1,7 +1,11 @@
-"""
-strategy.py - P2-ETF-REGIME-PREDICTOR v2 (CORRECTED)
+strategy.py — P2-ETF-REGIME-PREDICTOR v2 (CORRECTED v2)
 =========================================
 Signal execution, backtesting, and performance metrics.
+
+Fixes in v2:
+- Ensure last_p array contains valid probabilities (no NaN/Inf)
+- Better handling of edge cases in conviction calculation
+- Added validation for input data
 
 All functions accept target_etfs as a parameter — NO hardcoded ETF list.
 This allows the same strategy logic to work for both:
@@ -27,8 +31,6 @@ import pytz
 _EST = pytz.timezone("US/Eastern")
 log = logging.getLogger(__name__)
 
-# REMOVED: No default ETF list — must be provided explicitly to prevent errors
-
 # Fixed Z threshold
 DEFAULT_Z_MIN = 0.7
 
@@ -53,16 +55,23 @@ def compute_conviction(p_beat_cash: np.ndarray) -> Tuple[int, float, str]:
     if len(p_beat_cash) == 0:
         return 0, 0.0, "Low"
 
-    mean = np.mean(p_beat_cash)
-    std = np.std(p_beat_cash)
+    # Clean the array - replace NaN/Inf with 0.5
+    p_clean = np.nan_to_num(p_beat_cash, nan=0.5, posinf=1.0, neginf=0.0)
 
-    if std < 1e-9 or np.isnan(std):
+    mean = np.mean(p_clean)
+    std = np.std(p_clean)
+
+    if std < 1e-9 or not np.isfinite(std):
         # All probabilities are essentially the same
-        best = int(np.argmax(p_beat_cash))
+        best = int(np.argmax(p_clean))
         return best, 0.0, "Low"
 
-    best = int(np.argmax(p_beat_cash))
-    z = float((p_beat_cash[best] - mean) / std)
+    best = int(np.argmax(p_clean))
+    z = float((p_clean[best] - mean) / std)
+
+    # Ensure z is finite
+    if not np.isfinite(z):
+        z = 0.0
 
     # CORRECTED: More granular conviction labels
     label = ("Very High" if z >= 2.5 else
@@ -91,10 +100,14 @@ def compute_sweep_z(strat_rets: np.ndarray,
     mean_ex = float(np.mean(excess))
     std_ex = float(np.std(excess))
 
-    if std_ex < 1e-9 or np.isnan(std_ex):
+    if std_ex < 1e-9 or not np.isfinite(std_ex) or not np.isfinite(mean_ex):
         return 0.0, "Low"
 
     z = float(mean_ex / std_ex * np.sqrt(len(excess)))
+
+    if not np.isfinite(z):
+        return 0.0, "Low"
+
     label = ("Very High" if z >= 3.0 else
              "High" if z >= 1.5 else
              "Moderate" if z >= 0.5 else "Low")
@@ -123,7 +136,9 @@ def execute_strategy(
     Returns
     -------
     (strat_rets, audit_trail, next_date, next_signal,
-     conviction_z, conviction_label, last_p_array)
+     conviction_z, conviction_label, last_p)
+
+    CORRECTED: last_p is now guaranteed to contain valid probabilities (no NaN/Inf)
     """
     # CORRECTED: No default fallback — require explicit ETF list
     if target_etfs is None:
@@ -145,7 +160,7 @@ def execute_strategy(
     etf_rets_buf = []
     stop_active = False
     cum_ret = 1.0
-    p_array = np.full(n_etfs, 0.5)
+    p_array = np.full(n_etfs, 1.0 / n_etfs)  # Equal weight default
 
     # Build column name lists for this ETF universe
     p_cols = [f"{t}_P" for t in target_etfs]
@@ -157,8 +172,9 @@ def execute_strategy(
     common_dates = predictions_df.index.intersection(daily_ret_df.index)
     if len(common_dates) == 0:
         log.warning("execute_strategy: no common dates between predictions and returns")
+        # CORRECTED: Return valid last_p even on error
         return (np.array([]), [], pd.Timestamp(datetime.now()),
-                "CASH", 0.0, "Low", np.full(n_etfs, 0.5))
+                "CASH", 0.0, "Low", np.full(n_etfs, 1.0 / n_etfs))
 
     pred_a = predictions_df.loc[common_dates]
     ret_a = daily_ret_df.loc[common_dates]
@@ -167,15 +183,30 @@ def execute_strategy(
         row = pred_a.iloc[i]
         ret_row = ret_a.iloc[i]
 
-        # CORRECTED: Handle missing columns gracefully
-        p_array = np.array([float(row.get(c, 0.5)) for c in p_cols])
+        # CORRECTED: Handle missing columns gracefully and ensure valid values
+        p_array = []
+        for c in p_cols:
+            val = float(row.get(c, 1.0 / n_etfs))
+            # Ensure valid probability
+            if not np.isfinite(val):
+                val = 1.0 / n_etfs
+            p_array.append(val)
+        p_array = np.array(p_array)
+
+        # Normalize to ensure sum = 1
+        p_sum = np.sum(p_array)
+        if p_sum > 0 and np.isfinite(p_sum):
+            p_array = p_array / p_sum
+        else:
+            p_array = np.full(n_etfs, 1.0 / n_etfs)
+
         rs_array = np.array([float(row.get(c, 0.0)) for c in rs_cols])
-        pa_array = np.array([float(row.get(c, p_array[j] - 0.5))
+        pa_array = np.array([float(row.get(c, p_array[j] - 1.0/n_etfs))
                              for j, c in enumerate(pa_cols)])
         dis_arr = np.array([bool(row.get(c, False)) for c in dis_cols])
 
         # Use rank scores if they have variance, otherwise use adjusted probabilities
-        rank_input = rs_array if rs_array.std() > 1e-6 else pa_array
+        rank_input = rs_array if np.std(rs_array) > 1e-6 else pa_array
         ranked = np.argsort(rank_input)[::-1]
         best_idx = int(ranked[0])
         _, day_z, day_label = compute_conviction(p_array)
@@ -279,7 +310,23 @@ def execute_strategy(
     last_date = common_dates[-1]
     next_date = _next_trading_day(last_date)
     last_row = pred_a.iloc[-1]
-    last_p = np.array([float(last_row.get(c, 0.5)) for c in p_cols])
+
+    # CORRECTED: Build last_p with validation
+    last_p = []
+    for c in p_cols:
+        val = float(last_row.get(c, 1.0 / n_etfs))
+        if not np.isfinite(val):
+            val = 1.0 / n_etfs
+        last_p.append(val)
+    last_p = np.array(last_p)
+
+    # Normalize
+    p_sum = np.sum(last_p)
+    if p_sum > 0 and np.isfinite(p_sum):
+        last_p = last_p / p_sum
+    else:
+        last_p = np.full(n_etfs, 1.0 / n_etfs)
+
     nb, nz, nl = compute_conviction(last_p)
     next_signal = target_etfs[nb]
 
@@ -325,7 +372,7 @@ def calculate_metrics(strat_rets: np.ndarray,
 
     # CORRECTED: Handle zero std case
     std_excess = float(np.std(excess))
-    if std_excess < 1e-9:
+    if std_excess < 1e-9 or not np.isfinite(std_excess):
         sharpe = 0.0
     else:
         sharpe = float(np.mean(excess) / std_excess * np.sqrt(252))
@@ -383,7 +430,7 @@ def calculate_benchmark_metrics(bench_rets: np.ndarray,
     ann_ret = float(cum[-1] ** (252 / len(bench_rets)) - 1)
 
     std_rets = float(np.std(bench_rets))
-    if std_rets < 1e-9:
+    if std_rets < 1e-9 or not np.isfinite(std_rets):
         sharpe = 0.0
     else:
         sharpe = ((float(np.mean(bench_rets)) - rf_rate / 252) /
@@ -405,6 +452,14 @@ def build_signal_row(next_date, next_signal, conviction_z, conviction_label,
     if target_etfs is None:
         raise ValueError("target_etfs must be provided explicitly")
 
+    # CORRECTED: Ensure p_array contains valid values
+    p_clean = []
+    for p in p_array:
+        val = float(p)
+        if not np.isfinite(val):
+            val = 0.5
+        p_clean.append(val)
+
     row = {
         "Signal": next_signal,
         "Conviction_Z": round(conviction_z, 3),
@@ -416,7 +471,7 @@ def build_signal_row(next_date, next_signal, conviction_z, conviction_label,
         "Max_DD_Pct": round(metrics.get("max_dd", 0) * 100, 2),
     }
     for i, etf in enumerate(target_etfs):
-        row[f"{etf}_P"] = round(float(p_array[i]), 4)
+        row[f"{etf}_P"] = round(p_clean[i], 4)
     return pd.DataFrame([row], index=[next_date])
 
 
