@@ -230,23 +230,26 @@ class MomentumRanker:
     
     def predict_all_history(self, df: pd.DataFrame) -> pd.DataFrame:
         """Generate predictions for entire history."""
-        predictions = []
-        
+        records = []
+        index   = []
+
         for idx in range(self.lookback, len(df)):
-            row = df.iloc[idx]
+            row  = df.iloc[idx]
             pred = self.predict(row)
-            
-            # Create prediction row
-            pred_row = pd.Series(index=df.index[idx])
+
+            # Build a plain dict for this row — avoids pd.Series(index=Timestamp)
+            # which crashes in pandas >= 2.0 when a scalar is passed as index.
+            record = {}
             for etf in self.target_etfs:
-                pred_row[f"{etf}_Prob"] = pred["Weights"].get(etf, 0)
-            pred_row["Top_Pick"] = pred["Top_Pick"]
-            pred_row["Regime"] = pred["Regime"]
-            
-            predictions.append(pred_row)
-        
-        if predictions:
-            return pd.DataFrame(predictions)
+                record[f"{etf}_Prob"] = pred["Weights"].get(etf, 0)
+            record["Top_Pick"] = pred["Top_Pick"]
+            record["Regime"]   = pred["Regime"]
+
+            records.append(record)
+            index.append(df.index[idx])
+
+        if records:
+            return pd.DataFrame(records, index=pd.DatetimeIndex(index))
         else:
             return pd.DataFrame()
 
