@@ -99,12 +99,12 @@ def _load_fixed_k(option: str) -> Optional[int]:
     Falls back to None if detector not yet saved.
     """
     try:
-        detector_bytes = hf_load_detector(option)
-        if detector_bytes is None:
+        detector = hf_load_detector(option)
+        if detector is None:
             log.warning(f"{_label(option)}: no saved detector on HF — "
                         "will run k-selection")
             return None
-        detector = pickle.loads(detector_bytes)
+        # load_detector returns the unpickled object directly (not raw bytes)
         k = detector.optimal_k_
         log.info(f"{_label(option)}: loaded fixed_k={k} from saved HF detector")
         return k
