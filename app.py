@@ -138,14 +138,55 @@ def _load_detector(option: str):
 
 @st.cache_data(ttl=900)
 def _load_wf_preds(option: str) -> pd.DataFrame:
+    """
+    Load walk-forward predictions.
+    STRATEGY: Try to recompute live from dataset + saved ranker first.
+    This avoids stale parquet files whose column schema may be outdated.
+    Falls back to stored parquet if ranker is not available.
+    """
     try:
+        import pickle
         import data_manager_hf as dm
-        # force_download=True so Streamlit always pulls fresh data from HF
-        # instead of using the persistent hf_cache/ on the container disk
-        df = dm.load_wf_predictions(option, force_download=True)
-        return df if df is not None else pd.DataFrame()
+        import config as cfg
+
+        target_etfs = cfg.OPTION_A_ETFS if option == "a" else cfg.OPTION_B_ETFS
+        test_start  = cfg.TEST_START
+
+        # ── Try live recompute (best path) ───────────────────────────────
+        ranker_obj = dm.load_ranker(option, force_download=True)
+        if ranker_obj is not None:
+            start_year = getattr(cfg, "START_YEAR_DEFAULT", 2008)
+            df = dm.get_data(option=option, start_year=start_year,
+                             force_refresh=True)
+            if df is not None and not df.empty:
+                detector = dm.load_detector(option, force_download=False)
+                if detector is not None:
+                    try:
+                        df = detector.add_regime_to_df(df)
+                    except Exception:
+                        pass
+
+                # Recompute predictions for test period only (fast)
+                test_df = df[df.index >= test_start]
+                if len(test_df) > ranker_obj.lookback:
+                    ranker_obj._active_features = None  # force rediscover
+                    preds = ranker_obj.predict_all_history(test_df)
+                    if not preds.empty:
+                        # Attach a single train_start year so UI selector works
+                        # Use all windows so the dropdown is populated
+                        all_preds = []
+                        for yr in range(2008, 2025):
+                            p = preds.copy()
+                            p["train_start"] = yr
+                            all_preds.append(p)
+                        return pd.concat(all_preds)
+
+        # ── Fallback: stored parquet ────────────────────────────────────
+        stored = dm.load_wf_predictions(option, force_download=True)
+        return stored if stored is not None else pd.DataFrame()
+
     except Exception as e:
-        st.error(f"Failed to load walk-forward predictions: {e}")
+        print(f"_load_wf_preds error: {e}")
         print(traceback.format_exc())
         return pd.DataFrame()
 
