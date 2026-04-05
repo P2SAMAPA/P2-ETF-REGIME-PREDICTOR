@@ -1,18 +1,22 @@
 name: Manual Retrain — P2-ETF-REGIME-PREDICTOR
 
-# Runs daily at 03:00 UTC (11 PM ET) and on-demand via workflow_dispatch.
-# Always retrains both Option A and Option B in parallel.
-# No user inputs — force_refresh is always false (data updated separately
-# by daily_data_update.yml). To force a full data rebuild, run seed instead.
+# Trigger manually or on schedule.
+# Use force_retrain=true (default) to wipe the stale wf parquet and
+# recompute all windows from scratch — required any time models.py changes.
 
 on:
   schedule:
     - cron: '0 3 * * 1-5'
   workflow_dispatch:
+    inputs:
+      force_retrain:
+        description: 'Wipe existing wf predictions and retrain all windows (true/false)'
+        required: false
+        default: 'true'
 
 jobs:
 
-  # ── Job 1: Full retrain Option A ─────────────────────────────────────────────
+  # ── Job 1: Full retrain Option A ──────────────────────────────────────────
   retrain-full-a:
     name: Full Retrain — Option A (FI/Commodities)
     runs-on: ubuntu-latest
@@ -34,9 +38,15 @@ jobs:
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
           FRED_API_KEY: ${{ secrets.FRED_API_KEY }}
-        run: python train_hf.py --option a
+        run: |
+          RETRAIN="${{ github.event.inputs.force_retrain }}"
+          if [ "$RETRAIN" = "true" ] || [ -z "$RETRAIN" ]; then
+            python train_hf.py --option a --force-retrain
+          else
+            python train_hf.py --option a
+          fi
 
-  # ── Job 2: Full retrain Option B ─────────────────────────────────────────────
+  # ── Job 2: Full retrain Option B ──────────────────────────────────────────
   retrain-full-b:
     name: Full Retrain — Option B (Equity ETFs)
     runs-on: ubuntu-latest
@@ -58,13 +68,20 @@ jobs:
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
           FRED_API_KEY: ${{ secrets.FRED_API_KEY }}
-        run: python train_hf.py --option b
+        run: |
+          RETRAIN="${{ github.event.inputs.force_retrain }}"
+          if [ "$RETRAIN" = "true" ] || [ -z "$RETRAIN" ]; then
+            python train_hf.py --option b --force-retrain
+          else
+            python train_hf.py --option b
+          fi
 
-  # ── Job 3: WF CV + sweep Option A ────────────────────────────────────────────
+  # ── Job 3: WF CV + sweep Option A ─────────────────────────────────────────
   retrain-wf-sweep-a:
     name: WF + Sweep — Option A (FI/Commodities)
     runs-on: ubuntu-latest
     timeout-minutes: 300
+    needs: retrain-full-a   # wait for full retrain to finish first
 
     steps:
       - uses: actions/checkout@v4
@@ -78,22 +95,29 @@ jobs:
           restore-keys: ${{ runner.os }}-pip-
       - name: Install dependencies
         run: pip install -r requirements.txt
-      - name: WF CV Option A (incremental, fast path)
+      - name: WF CV Option A
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
           FRED_API_KEY: ${{ secrets.FRED_API_KEY }}
-        run: python train_hf.py --option a --wfcv
+        run: |
+          RETRAIN="${{ github.event.inputs.force_retrain }}"
+          if [ "$RETRAIN" = "true" ] || [ -z "$RETRAIN" ]; then
+            python train_hf.py --option a --wfcv --force-retrain
+          else
+            python train_hf.py --option a --wfcv
+          fi
       - name: Consensus sweep Option A
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
           FRED_API_KEY: ${{ secrets.FRED_API_KEY }}
         run: python train_hf.py --option a --sweep
 
-  # ── Job 4: WF CV + sweep Option B ────────────────────────────────────────────
+  # ── Job 4: WF CV + sweep Option B ─────────────────────────────────────────
   retrain-wf-sweep-b:
     name: WF + Sweep — Option B (Equity ETFs)
     runs-on: ubuntu-latest
     timeout-minutes: 300
+    needs: retrain-full-b   # wait for full retrain to finish first
 
     steps:
       - uses: actions/checkout@v4
@@ -107,11 +131,17 @@ jobs:
           restore-keys: ${{ runner.os }}-pip-
       - name: Install dependencies
         run: pip install -r requirements.txt
-      - name: WF CV Option B (incremental, fast path)
+      - name: WF CV Option B
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
           FRED_API_KEY: ${{ secrets.FRED_API_KEY }}
-        run: python train_hf.py --option b --wfcv
+        run: |
+          RETRAIN="${{ github.event.inputs.force_retrain }}"
+          if [ "$RETRAIN" = "true" ] || [ -z "$RETRAIN" ]; then
+            python train_hf.py --option b --wfcv --force-retrain
+          else
+            python train_hf.py --option b --wfcv
+          fi
       - name: Consensus sweep Option B
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
