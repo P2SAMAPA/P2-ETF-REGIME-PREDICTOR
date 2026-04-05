@@ -136,11 +136,13 @@ def _load_detector(option: str):
         return None
 
 
-@st.cache_data(ttl=1800)
+@st.cache_data(ttl=900)
 def _load_wf_preds(option: str) -> pd.DataFrame:
     try:
         import data_manager_hf as dm
-        df = dm.load_wf_predictions(option, force_download=False)
+        # force_download=True so Streamlit always pulls fresh data from HF
+        # instead of using the persistent hf_cache/ on the container disk
+        df = dm.load_wf_predictions(option, force_download=True)
         return df if df is not None else pd.DataFrame()
     except Exception as e:
         st.error(f"Failed to load walk-forward predictions: {e}")
@@ -148,29 +150,29 @@ def _load_wf_preds(option: str) -> pd.DataFrame:
         return pd.DataFrame()
 
 
-@st.cache_data(ttl=3600)
+@st.cache_data(ttl=900)
 def _load_insample_preds(option: str) -> pd.DataFrame:
     try:
         import data_manager_hf as dm
-        df = dm.load_predictions(option)
+        df = dm.load_predictions(option, force_download=True)
         return df if df is not None else pd.DataFrame()
     except Exception as e:
         print(f"Error loading insample preds: {e}")
         return pd.DataFrame()
 
 
-@st.cache_data(ttl=3600)
+@st.cache_data(ttl=900)
 def _load_dataset(option: str, start_year: int) -> pd.DataFrame:
     try:
         import data_manager_hf as dm
-        return dm.get_data(option=option, start_year=start_year, force_refresh=False)
+        return dm.get_data(option=option, start_year=start_year, force_refresh=True)
     except Exception as e:
         st.error(f"Failed to load dataset: {e}")
         print(traceback.format_exc())
         return pd.DataFrame()
 
 
-@st.cache_data(ttl=1800)
+@st.cache_data(ttl=900)
 def _load_sweep(option: str) -> tuple:
     try:
         import data_manager_hf as dm
@@ -853,7 +855,12 @@ def main():
                 key="sidebar_fee_bps",
             )
             st.divider()
-            st.caption("Parameters apply to both options.")
+            if st.button("🔄 Force Refresh Data from HF"):
+                st.cache_data.clear()
+                st.cache_resource.clear()
+                st.success("Cache cleared — reloading fresh data from Hugging Face...")
+                st.rerun()
+            st.caption("Parameters apply to both options. Data refreshes every 15 min.")
 
         params = {"stop_loss": stop_loss, "z_reentry": z_reentry, "fee_bps": fee_bps}
 
