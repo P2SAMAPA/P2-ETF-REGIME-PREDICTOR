@@ -38,7 +38,7 @@ jobs:
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
           FRED_API_KEY: ${{ secrets.FRED_API_KEY }}
-        run: python train_hf.py --option a
+        run: python train_hf.py --option a --force-retrain
 
   # ── Job 2: Full train Option B (live signal) ────────────────────────────────
   full-train-b:
@@ -62,7 +62,7 @@ jobs:
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
           FRED_API_KEY: ${{ secrets.FRED_API_KEY }}
-        run: python train_hf.py --option b
+        run: python train_hf.py --option b --force-retrain
 
   # ── Job 3: WF CV + sweep Option A ──────────────────────────────────────────
   wf-sweep-a:
@@ -86,7 +86,7 @@ jobs:
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
           FRED_API_KEY: ${{ secrets.FRED_API_KEY }}
-        run: python train_hf.py --option a --wfcv
+        run: python train_hf.py --option a --wfcv --force-retrain
       - name: Consensus sweep Option A
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
@@ -115,7 +115,7 @@ jobs:
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
           FRED_API_KEY: ${{ secrets.FRED_API_KEY }}
-        run: python train_hf.py --option b --wfcv
+        run: python train_hf.py --option b --wfcv --force-retrain
       - name: Consensus sweep Option B
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
