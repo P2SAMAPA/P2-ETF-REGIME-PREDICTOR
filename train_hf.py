@@ -155,24 +155,34 @@ def get_top_pick(ranker: MomentumRanker, row: pd.Series) -> str:
     preds = ranker.predict(row)
     return preds["Rank_Score"].idxmax()
 
-def run_full_training(option: str, force_refresh: bool = False) -> None:
+def run_full_training(option: str, force_refresh: bool = False,
+                      force_retrain: bool = False) -> None:
     """
     Train all windows sequentially. Saves detector (with optimal_k_) once.
     Predictions are stored in a single table with a train_start column.
+
+    force_retrain=True  clears existing_start_years so all windows are
+    recomputed. Use whenever models.py column schema changes.
     """
     log.info(f"{'='*60}")
     log.info(f"{_label(option)}: full training pipeline (all windows)")
+    if force_retrain:
+        log.info(f"{_label(option)}: --force-retrain set — all windows will be recomputed")
     log.info(f"{'='*60}")
 
     df = get_data(option=option, start_year=cfg.START_YEAR_DEFAULT,
                   force_refresh=force_refresh)
 
-    # Determine which windows already have predictions (incremental)
-    existing = load_wf_predictions(option, force_download=True)
+    # Determine which windows already have predictions (incremental).
+    # force_retrain bypasses the cache so every window runs fresh.
     existing_start_years = set()
-    if existing is not None and not existing.empty and "train_start" in existing.columns:
-        existing_start_years = set(existing["train_start"].unique())
-        log.info(f"{_label(option)}: already computed windows: {sorted(existing_start_years)}")
+    if not force_retrain:
+        existing = load_wf_predictions(option, force_download=True)
+        if existing is not None and not existing.empty and "train_start" in existing.columns:
+            existing_start_years = set(existing["train_start"].unique())
+            log.info(f"{_label(option)}: already computed windows: {sorted(existing_start_years)}")
+    else:
+        log.info(f"{_label(option)}: skipping existing predictions check (force_retrain)")
 
     # Load or compute fixed_k once (use the latest window for k-selection, or any)
     fixed_k = _load_fixed_k(option)
@@ -432,6 +442,9 @@ def main():
                         help="Which option: a (FI/Commodities) or b (Equity ETFs)")
     parser.add_argument("--force-refresh", action="store_true",
                         help="Force full dataset rebuild from source APIs")
+    parser.add_argument("--force-retrain", action="store_true",
+                        help="Ignore existing wf predictions and retrain all windows from scratch. "
+                             "Use this when models.py column schema has changed.")
     parser.add_argument("--wfcv", action="store_true",
                         help="Run incremental walk-forward CV (fast path)")
     parser.add_argument("--sweep", action="store_true",
@@ -454,10 +467,11 @@ def main():
         elif args.sweep:
             run_sweep(option, force_refresh=args.force_refresh)
         elif args.wfcv:
-            # In the new scheme, wfcv is the same as full training (incremental)
-            run_full_training(option, force_refresh=args.force_refresh)
+            run_full_training(option, force_refresh=args.force_refresh,
+                              force_retrain=getattr(args, "force_retrain", False))
         else:
-            run_full_training(option, force_refresh=args.force_refresh)
+            run_full_training(option, force_refresh=args.force_refresh,
+                              force_retrain=getattr(args, "force_retrain", False))
 
         log.info(f"Option {option.upper()}: pipeline completed successfully")
 
