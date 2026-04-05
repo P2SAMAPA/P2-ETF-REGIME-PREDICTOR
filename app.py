@@ -90,12 +90,28 @@ def _safe_get_config(attr, default=None):
 
 
 def _extract_prediction_columns(pred_df: pd.DataFrame, target_etfs: list) -> pd.DataFrame:
+    """
+    Extract per-ETF probability columns from the predictions DataFrame.
+    predict_all_history() produces columns named {ETF}_Prob.
+    Falls back to legacy column patterns for backward compatibility.
+    """
     if pred_df is None or pred_df.empty:
         return pd.DataFrame()
     available = {}
     for etf in target_etfs:
-        candidates = [c for c in pred_df.columns
-                      if c.startswith(f"{etf}_") and c.endswith("_P")]
+        # Primary: {ETF}_Prob  (current models.py output)
+        if f"{etf}_Prob" in pred_df.columns:
+            available[etf] = f"{etf}_Prob"
+            continue
+        # Fallback 1: any column starting with ETF_ and ending _P (legacy)
+        candidates = [col for col in pred_df.columns
+                      if col.startswith(f"{etf}_") and col.endswith("_P")]
+        if candidates:
+            available[etf] = candidates[0]
+            continue
+        # Fallback 2: any column starting with ETF_ (broadest match)
+        candidates = [col for col in pred_df.columns
+                      if col.startswith(f"{etf}_")]
         if candidates:
             available[etf] = candidates[0]
     if not available:
@@ -113,9 +129,8 @@ def _extract_prediction_columns(pred_df: pd.DataFrame, target_etfs: list) -> pd.
 def _load_detector(option: str):
     try:
         import data_manager_hf as dm
-        from regime_detection import RegimeDetector
-        b = dm.load_detector(option)
-        return RegimeDetector.from_bytes(b) if b else None
+        # load_detector returns the unpickled RegimeDetector object directly
+        return dm.load_detector(option)
     except Exception as e:
         print(f"Error loading detector: {e}")
         return None
@@ -159,6 +174,8 @@ def _load_dataset(option: str, start_year: int) -> pd.DataFrame:
 def _load_sweep(option: str) -> tuple:
     try:
         import data_manager_hf as dm
+        # load_sweep_results scans HF for dated sweep files and returns
+        # (dict of year->result, latest_date_string)
         return dm.load_sweep_results(option)
     except Exception as e:
         print(f"Error loading sweep: {e}")
