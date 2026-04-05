@@ -42,6 +42,18 @@ except Exception:
 
 HF_REPO_ID = REPO_ID          # legacy alias kept for seed workflow
 REPO_TYPE  = "dataset"        # ← THE KEY FIX
+
+# ETF universe exports (needed by seed_hf_dataset.yml)
+try:
+    import config as _cfg
+    TARGET_ETFS = _cfg.OPTION_A_ETFS   # default to Option A universe
+    ALL_TICKERS = list(dict.fromkeys(
+        _cfg.OPTION_A_ETFS + _cfg.OPTION_A_BENCHMARKS +
+        _cfg.OPTION_B_ETFS + _cfg.OPTION_B_BENCHMARKS
+    ))
+except Exception:
+    TARGET_ETFS = ["TLT", "VNQ", "SLV", "GLD", "LQD", "HYG"]
+    ALL_TICKERS = TARGET_ETFS + ["SPY", "AGG"]
 LOCAL_CACHE = "./hf_cache"
 
 # ── Authentication ─────────────────────────────────────────────────────────────
