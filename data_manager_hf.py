@@ -311,10 +311,96 @@ def load_feature_list(option: str, force_download: bool = False):
     return data.get("features") if data else None
 
 def save_sweep_result(result: Dict, year: int, option: str, upload: bool = True):
-    save_json(result, f"sweep_{year}", option, upload=upload)
+    """Save a sweep result for a year. Uploads to option_X/sweep/sweep_YYYY_YYYYMMDD.json"""
+    date_str   = datetime.now().strftime("%Y%m%d")
+    name       = f"sweep_{year}"
+    cache_path = _get_cache_path(f"{name}.json", option)
+    with open(cache_path, "w") as f:
+        json.dump(result, f, indent=2, default=str)
+    if upload:
+        # Write to sweep/ subfolder with date stamp (matches existing HF structure)
+        remote = f"option_{option}/sweep/sweep_{year}_{date_str}.json"
+        upload_to_hub(cache_path, remote)
 
-def load_sweep_result(year: int, option: str, force_download: bool = False):
-    return load_json(f"sweep_{year}", option, force_download=force_download)
+def load_sweep_result(year: int, option: str, force_download: bool = False) -> Optional[Dict]:
+    """Load the latest sweep result for a given year."""
+    cache_path = _get_cache_path(f"sweep_{year}.json", option)
+    if not force_download and os.path.exists(cache_path):
+        try:
+            with open(cache_path) as f:
+                return json.load(f)
+        except Exception:
+            pass
+    # Try to download the latest dated file from HF
+    if HF_AVAILABLE:
+        temp_path = cache_path + ".tmp"
+        # Try un-dated path first (legacy)
+        for remote in [
+            f"option_{option}/meta/sweep_{year}.json",
+            f"option_{option}/sweep/sweep_{year}.json",
+        ]:
+            if download_from_hub(remote, temp_path):
+                if os.path.exists(temp_path):
+                    os.replace(temp_path, cache_path)
+                    with open(cache_path) as f:
+                        return json.load(f)
+    return None
+
+def load_sweep_results(option: str) -> tuple:
+    """
+    Load all sweep results for an option by scanning the HF repo for sweep files.
+    Returns (dict of year->result, date_string_of_latest_file).
+    Called by app.py.
+    """
+    results   = {}
+    best_date = None
+
+    if not HF_AVAILABLE:
+        return results, best_date
+
+    try:
+        files = list_repo_files(REPO_ID, repo_type=REPO_TYPE)
+    except Exception as e:
+        log.warning(f"load_sweep_results: could not list repo files: {e}")
+        return results, best_date
+
+    # Collect sweep files: option_a/sweep/sweep_YYYY_YYYYMMDD.json
+    import re
+    prefix  = f"option_{option}/sweep/"
+    pattern = re.compile(rf"option_{option}/sweep/sweep_(\d{{4}})_(\d{{8}})\.json")
+    # Group by year, keep only the latest date stamp per year
+    best_per_year: Dict[int, str] = {}
+    for fpath in files:
+        m = pattern.match(fpath)
+        if m:
+            yr, ds = int(m.group(1)), m.group(2)
+            if yr not in best_per_year or ds > best_per_year[yr]:
+                best_per_year[yr] = ds
+
+    if not best_per_year:
+        log.warning(f"load_sweep_results: no sweep files found for option {option}")
+        return results, best_date
+
+    best_date = max(best_per_year.values())
+
+    for year, date_stamp in best_per_year.items():
+        remote    = f"option_{option}/sweep/sweep_{year}_{date_stamp}.json"
+        cache_key = f"sweep_{year}_{date_stamp}"
+        cache_path = _get_cache_path(f"{cache_key}.json", option)
+        if not os.path.exists(cache_path):
+            temp = cache_path + ".tmp"
+            if download_from_hub(remote, temp):
+                if os.path.exists(temp):
+                    os.replace(temp, cache_path)
+        if os.path.exists(cache_path):
+            try:
+                with open(cache_path) as f:
+                    results[year] = json.load(f)
+            except Exception as e:
+                log.warning(f"load_sweep_results: could not parse {cache_path}: {e}")
+
+    log.info(f"load_sweep_results: loaded {len(results)} sweep years for option {option}")
+    return results, best_date
 
 def list_available_data(option: str) -> Dict[str, bool]:
     return {
