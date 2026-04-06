@@ -1,12 +1,12 @@
 name: Daily Pipeline — P2-ETF-REGIME-PREDICTOR
 
 # Estimated runtimes (free tier):
-#   full-train-a:  ~30 min  (full k-selection + 5 inits, live signal)
-#   full-train-b:  ~35 min  (larger universe)
-#   wf-sweep-a:    ~80 min  (14 folds × ~4 min fast path, no k re-selection)
-#   wf-sweep-b:    ~100 min (larger universe)
-# All 4 jobs run in parallel — wall clock ~100 min, well within 6h limit.
-# fixed_k loaded from saved HF detector — no redundant k-selection in WF jobs.
+#   full-train-a:  ~30 min  (incremental, only new windows)
+#   full-train-b:  ~35 min
+#   wf-sweep-a:    ~80 min  (incremental, fixed_k from saved detector)
+#   wf-sweep-b:    ~100 min
+# Jobs 3 & 4 wait for Jobs 1 & 2 to finish (needs:) so the saved
+# detector/ranker exists before the WF sweep reads it.
 
 on:
   schedule:
@@ -34,11 +34,11 @@ jobs:
           restore-keys: ${{ runner.os }}-pip-
       - name: Install dependencies
         run: pip install -r requirements.txt
-      - name: Full train Option A
+      - name: Full train Option A (incremental)
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
           FRED_API_KEY: ${{ secrets.FRED_API_KEY }}
-        run: python train_hf.py --option a --force-retrain
+        run: python train_hf.py --option a
 
   # ── Job 2: Full train Option B (live signal) ────────────────────────────────
   full-train-b:
@@ -58,17 +58,18 @@ jobs:
           restore-keys: ${{ runner.os }}-pip-
       - name: Install dependencies
         run: pip install -r requirements.txt
-      - name: Full train Option B
+      - name: Full train Option B (incremental)
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
           FRED_API_KEY: ${{ secrets.FRED_API_KEY }}
-        run: python train_hf.py --option b --force-retrain
+        run: python train_hf.py --option b
 
   # ── Job 3: WF CV + sweep Option A ──────────────────────────────────────────
   wf-sweep-a:
     name: WF + Sweep — Option A (FI/Commodities)
     runs-on: ubuntu-latest
     timeout-minutes: 300
+    needs: full-train-a
 
     steps:
       - uses: actions/checkout@v4
@@ -86,7 +87,7 @@ jobs:
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
           FRED_API_KEY: ${{ secrets.FRED_API_KEY }}
-        run: python train_hf.py --option a --wfcv --force-retrain
+        run: python train_hf.py --option a --wfcv
       - name: Consensus sweep Option A
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
@@ -98,6 +99,7 @@ jobs:
     name: WF + Sweep — Option B (Equity ETFs)
     runs-on: ubuntu-latest
     timeout-minutes: 300
+    needs: full-train-b
 
     steps:
       - uses: actions/checkout@v4
@@ -115,7 +117,7 @@ jobs:
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
           FRED_API_KEY: ${{ secrets.FRED_API_KEY }}
-        run: python train_hf.py --option b --wfcv --force-retrain
+        run: python train_hf.py --option b --wfcv
       - name: Consensus sweep Option B
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
