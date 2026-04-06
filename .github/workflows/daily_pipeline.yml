@@ -20,7 +20,7 @@ jobs:
   full-train-a:
     name: Full Train — Option A (FI/Commodities)
     runs-on: ubuntu-latest
-    timeout-minutes: 90
+    timeout-minutes: 180
 
     steps:
       - uses: actions/checkout@v4
@@ -44,7 +44,7 @@ jobs:
   full-train-b:
     name: Full Train — Option B (Equity ETFs)
     runs-on: ubuntu-latest
-    timeout-minutes: 90
+    timeout-minutes: 180
 
     steps:
       - uses: actions/checkout@v4
@@ -68,7 +68,7 @@ jobs:
   wf-sweep-a:
     name: WF + Sweep — Option A (FI/Commodities)
     runs-on: ubuntu-latest
-    timeout-minutes: 240
+    timeout-minutes: 300
 
     steps:
       - uses: actions/checkout@v4
@@ -97,7 +97,7 @@ jobs:
   wf-sweep-b:
     name: WF + Sweep — Option B (Equity ETFs)
     runs-on: ubuntu-latest
-    timeout-minutes: 240
+    timeout-minutes: 300
 
     steps:
       - uses: actions/checkout@v4
