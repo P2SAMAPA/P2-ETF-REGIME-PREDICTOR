@@ -139,51 +139,73 @@ def _load_detector(option: str):
 @st.cache_data(ttl=900)
 def _load_wf_preds(option: str) -> pd.DataFrame:
     """
-    Load walk-forward predictions.
-    STRATEGY: Try to recompute live from dataset + saved ranker first.
-    This avoids stale parquet files whose column schema may be outdated.
-    Falls back to stored parquet if ranker is not available.
+    Load walk-forward predictions with three-tier fallback:
+
+    1. Stored wf parquet on HF (primary — written by training pipeline)
+    2. Live recompute from dataset + saved ranker (if parquet is missing/empty)
+    3. Empty DataFrame (shows 'no predictions' warning)
+
+    The stored parquet is preferred because it contains genuine per-window
+    OOS predictions with different train_start years.  The live recompute
+    is a safety net when the parquet hasn't been generated yet.
     """
     try:
-        import pickle
         import data_manager_hf as dm
         import config as cfg
+        from models import MomentumRanker
 
         target_etfs = cfg.OPTION_A_ETFS if option == "a" else cfg.OPTION_B_ETFS
         test_start  = cfg.TEST_START
 
-        # ── Try live recompute (best path) ───────────────────────────────
-        ranker_obj = dm.load_ranker(option, force_download=True)
-        if ranker_obj is not None:
-            start_year = getattr(cfg, "START_YEAR_DEFAULT", 2008)
-            df = dm.get_data(option=option, start_year=start_year,
-                             force_refresh=True)
-            if df is not None and not df.empty:
-                detector = dm.load_detector(option, force_download=False)
-                if detector is not None:
-                    try:
-                        df = detector.add_regime_to_df(df)
-                    except Exception:
-                        pass
-
-                # Recompute predictions for test period only (fast)
-                test_df = df[df.index >= test_start]
-                if len(test_df) > ranker_obj.lookback:
-                    ranker_obj._active_features = None  # force rediscover
-                    preds = ranker_obj.predict_all_history(test_df)
-                    if not preds.empty:
-                        # Attach a single train_start year so UI selector works
-                        # Use all windows so the dropdown is populated
-                        all_preds = []
-                        for yr in range(2008, 2025):
-                            p = preds.copy()
-                            p["train_start"] = yr
-                            all_preds.append(p)
-                        return pd.concat(all_preds)
-
-        # ── Fallback: stored parquet ────────────────────────────────────
+        # ── Tier 1: stored wf parquet (force fresh download) ─────────────
         stored = dm.load_wf_predictions(option, force_download=True)
-        return stored if stored is not None else pd.DataFrame()
+        if stored is not None and not stored.empty and "train_start" in stored.columns:
+            # Validate schema — check first ETF has _P or _Prob column
+            first_etf = target_etfs[0]
+            has_p_col = (f"{first_etf}_P" in stored.columns or
+                         f"{first_etf}_Prob" in stored.columns or
+                         any(c.startswith(f"{first_etf}_") for c in stored.columns))
+            if has_p_col:
+                return stored
+
+        # ── Tier 2: live recompute from ranker + dataset ─────────────────
+        # Rebuild a fresh MomentumRanker with the correct target_etfs
+        # (avoids issues with stale pickled rankers that may have empty target_etfs)
+        start_year = getattr(cfg, "START_YEAR_DEFAULT", 2008)
+        df = dm.get_data(option=option, start_year=start_year, force_refresh=True)
+
+        if df is not None and not df.empty:
+            detector = dm.load_detector(option, force_download=True)
+            if detector is not None:
+                try:
+                    df = detector.add_regime_to_df(df)
+                except Exception as det_err:
+                    print(f"detector.add_regime_to_df failed: {det_err}")
+
+            # Build a fresh ranker with the correct ETF universe
+            fresh_ranker = MomentumRanker(target_etfs=target_etfs)
+            try:
+                if "Regime" in df.columns:
+                    fresh_ranker.fit(df)
+            except Exception as fit_err:
+                print(f"fresh_ranker.fit failed: {fit_err}")
+
+            test_df = df[df.index >= test_start]
+            if len(test_df) > fresh_ranker.lookback:
+                preds = fresh_ranker.predict_all_history(test_df)
+                if not preds.empty:
+                    # Replicate across all training windows for the dropdown
+                    all_preds = []
+                    for yr in range(2008, 2025):
+                        p = preds.copy()
+                        p["train_start"] = yr
+                        all_preds.append(p)
+                    result = pd.concat(all_preds)
+                    print(f"_load_wf_preds: live recompute produced {len(preds)} rows "
+                          f"with cols {list(preds.columns[:5])}")
+                    return result
+
+        return pd.DataFrame()
 
     except Exception as e:
         print(f"_load_wf_preds error: {e}")
@@ -591,6 +613,23 @@ def render_single_year_tab(option: str, target_etfs: list, params: dict):
         st.error(f"Could not find prediction columns for {target_etfs}.")
         st.code(f"Available: {list(window_preds_raw.columns)}")
         return
+
+    # If predictions have _P columns already, pass through directly.
+    # If they have _Prob columns (old schema), rename to _P so strategy.py works.
+    first_etf = target_etfs[0] if target_etfs else ""
+    if first_etf and f"{first_etf}_Prob" in window_preds_raw.columns and        f"{first_etf}_P" not in window_preds_raw.columns:
+        rename_map = {}
+        for etf in target_etfs:
+            if f"{etf}_Prob" in window_preds_raw.columns:
+                rename_map[f"{etf}_Prob"] = f"{etf}_P"
+        window_preds_raw = window_preds_raw.rename(columns=rename_map)
+        # Also add stub _RS and _PA columns so strategy.py doesn't fall back
+        for etf in target_etfs:
+            if f"{etf}_P" in window_preds_raw.columns:
+                window_preds_raw[f"{etf}_RS"] = window_preds_raw[f"{etf}_P"]
+                window_preds_raw[f"{etf}_PA"] = window_preds_raw[f"{etf}_P"]
+                window_preds_raw[f"{etf}_Disagree"] = False
+        pred_df = _extract_prediction_columns(window_preds_raw, target_etfs)
 
     available_etfs = list(pred_df.columns)
     if len(available_etfs) < len(target_etfs):
