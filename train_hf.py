@@ -234,13 +234,15 @@ def run_full_training(option: str, force_refresh: bool = False,
         return
 
     new_preds = pd.concat(all_preds).sort_index()
-    if existing is not None and not existing.empty:
+    # When force_retrain=True, existing is never assigned — treat as None.
+    existing_safe = existing if not force_retrain else None
+    if existing_safe is not None and not existing_safe.empty:
         # If existing has no train_start column, we drop it (should not happen)
-        if "train_start" not in existing.columns:
+        if "train_start" not in existing_safe.columns:
             log.warning("Existing predictions lack train_start column; resetting.")
             merged = new_preds
         else:
-            merged = (pd.concat([existing, new_preds])
+            merged = (pd.concat([existing_safe, new_preds])
                       .pipe(lambda d: d[~d.index.duplicated(keep="last")])
                       .sort_index())
     else:
