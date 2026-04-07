@@ -120,13 +120,14 @@ def _merge_wf(existing: Optional[pd.DataFrame],
     """
     Merge new fold predictions into existing WF table.
     Deduplication key: (Date index, test_year column).
-    No reset_index stored — the DatetimeIndex is preserved throughout.
+    Handles old 'train_start' schema by discarding it — we can't mix schemas.
     """
     if existing is None or existing.empty:
         return new_preds.sort_index()
 
     if "test_year" not in existing.columns:
-        log.warning("Existing wf_predictions lack 'test_year' column — resetting.")
+        log.warning("Existing wf_predictions use old 'train_start' schema — "
+                    "discarding stale data and starting fresh with new test_year schema.")
         return new_preds.sort_index()
 
     combined = pd.concat([existing, new_preds])
@@ -359,6 +360,17 @@ def run_sweep(option: str, years: Optional[list] = None,
                         f"run: --single-year {test_year}")
             continue
 
+        # Remove any non-strategy metadata columns so execute_strategy doesn't
+        # choke on unexpected columns, and deduplicate the index — the WF
+        # parquet may still have duplicate Date rows from previous pipeline runs
+        # with the old train_start schema.
+        drop_cols = [c for c in ["test_year", "train_start", "Top_Pick", "Regime"]
+                     if c in fold_preds.columns]
+        regime_from_preds = fold_preds["Regime"].copy() if "Regime" in fold_preds.columns else None
+        fold_preds = fold_preds.drop(columns=drop_cols)
+        # Deduplicate: keep last row per date (most recent training run wins)
+        fold_preds = fold_preds[~fold_preds.index.duplicated(keep="last")]
+
         test_end  = (window["test_end"] if window["test_end"] is not None
                      else df.index.max().strftime("%Y-%m-%d"))
         test_mask = ((df.index >= window["test_start"]) &
@@ -384,9 +396,12 @@ def run_sweep(option: str, years: Optional[list] = None,
                    if "DTB3" in test_df.columns else cfg.RISK_FREE_RATE)
 
         if "Regime_Name" in test_df.columns:
-            regime_series = test_df["Regime_Name"].reindex(common).ffill().fillna("Unknown")
-        elif "Regime" in pred_aligned.columns:
-            regime_series = pred_aligned["Regime"].reindex(common).fillna("Unknown").astype(str)
+            regime_series = (test_df["Regime_Name"]
+                             .reindex(common).ffill().fillna("Unknown"))
+        elif regime_from_preds is not None:
+            # Deduplicate regime series the same way before reindex
+            regime_clean = regime_from_preds[~regime_from_preds.index.duplicated(keep="last")]
+            regime_series = regime_clean.reindex(common).fillna("Unknown").astype(str)
         else:
             regime_series = pd.Series("Unknown", index=common)
 
