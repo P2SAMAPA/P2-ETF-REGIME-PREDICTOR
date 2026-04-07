@@ -134,9 +134,11 @@ for test_year in range(2012, 2026):
         "label":       f"Test {test_year}  (train 2008–{test_year-1})",
     })
 
-# Live window: test 2025-present (shown as "Live" in dropdown)
+# Live window: train 2008-2024, test 2025-present
+# Uses test_year=9999 as a sentinel so it never collides with a real year
+# and is excluded from historical sweep (is_live=True).
 WINDOWS.append({
-    "test_year":   2025,          # same integer as the last historical window
+    "test_year":   9999,
     "train_start": TRAIN_ANCHOR,
     "train_end":   "2024-12-31",
     "test_start":  TEST_START,
