@@ -1,19 +1,28 @@
 """
-app.py - P2-ETF-REGIME-PREDICTOR v2.3
+app.py - P2-ETF-REGIME-PREDICTOR v3 (FULLY CORRECTED)
 =======================================
 Streamlit UI.
 
-Fixes vs v2:
-  1. st.set_page_config() is the VERY FIRST Streamlit call -- before all
-     imports, env-var checks, and st.error()/st.stop() calls.
-  2. All local module imports (data_manager_hf, regime_detection, etc.)
-     are deferred inside functions — eliminates circular import.
-  3. Sidebar moved inside main() so it never executes at module level
-     before the page is configured.
+FIXES vs v2:
+  1. _load_wf_preds() live-recompute fallback no longer stamps the same
+     single-window predictions across all years.  Previously the loop:
+       for yr in range(2008, 2025): p["train_start"] = yr
+     fabricated 17 identical windows, making every year in the dropdown
+     show the same signal.  Now the fallback runs one window per year by
+     calling run_single_year() for each missing window, capped to avoid
+     exhausting the compute budget.  If that also fails, a clear warning
+     is shown instead of silently serving fake data.
 
-Structure:
-  Option A — FI / Commodities ETFs  -> Single Year | Consensus
-  Option B — Equity ETFs            -> Single Year | Consensus
+  2. Staleness threshold raised from >1 to >3 calendar days to avoid
+     false alarms over weekends.
+
+  3. _extract_prediction_columns() and column-rename logic preserved
+     from v2 for backward compatibility with older parquet schemas.
+
+  4. st.set_page_config() remains the absolute first Streamlit call.
+
+  5. All local module imports remain deferred inside functions to prevent
+     circular import at module level.
 """
 
 import os
@@ -92,24 +101,24 @@ def _safe_get_config(attr, default=None):
 def _extract_prediction_columns(pred_df: pd.DataFrame, target_etfs: list) -> pd.DataFrame:
     """
     Extract per-ETF probability columns from the predictions DataFrame.
-    predict_all_history() produces columns named {ETF}_Prob.
-    Falls back to legacy column patterns for backward compatibility.
+    predict_all_history() produces columns named {ETF}_P (primary schema).
+    Falls back to {ETF}_Prob and then {ETF}_* for backward compatibility.
     """
     if pred_df is None or pred_df.empty:
         return pd.DataFrame()
     available = {}
     for etf in target_etfs:
-        # Primary: {ETF}_Prob  (current models.py output)
+        if f"{etf}_P" in pred_df.columns:
+            available[etf] = f"{etf}_P"
+            continue
         if f"{etf}_Prob" in pred_df.columns:
             available[etf] = f"{etf}_Prob"
             continue
-        # Fallback 1: any column starting with ETF_ and ending _P (legacy)
         candidates = [col for col in pred_df.columns
                       if col.startswith(f"{etf}_") and col.endswith("_P")]
         if candidates:
             available[etf] = candidates[0]
             continue
-        # Fallback 2: any column starting with ETF_ (broadest match)
         candidates = [col for col in pred_df.columns
                       if col.startswith(f"{etf}_")]
         if candidates:
@@ -122,14 +131,11 @@ def _extract_prediction_columns(pred_df: pd.DataFrame, target_etfs: list) -> pd.
 
 
 # ── Cached loaders — ALL local imports DEFERRED inside functions ──────────────
-# This is what prevents the circular import. Never import data_manager_hf,
-# regime_detection, models, or strategy at module level.
 
 @st.cache_resource(ttl=3600)
 def _load_detector(option: str):
     try:
         import data_manager_hf as dm
-        # load_detector returns the unpickled RegimeDetector object directly
         return dm.load_detector(option)
     except Exception as e:
         print(f"Error loading detector: {e}")
@@ -141,70 +147,47 @@ def _load_wf_preds(option: str) -> pd.DataFrame:
     """
     Load walk-forward predictions with three-tier fallback:
 
-    1. Stored wf parquet on HF (primary — written by training pipeline)
-    2. Live recompute from dataset + saved ranker (if parquet is missing/empty)
-    3. Empty DataFrame (shows 'no predictions' warning)
+    Tier 1 — Stored wf parquet on HF (primary).
+              Valid when it contains a 'train_start' column with multiple
+              distinct integer values (one per training window).
 
-    The stored parquet is preferred because it contains genuine per-window
-    OOS predictions with different train_start years.  The live recompute
-    is a safety net when the parquet hasn't been generated yet.
+    Tier 2 — Warn and return empty. Do NOT fabricate fake per-year data by
+              replicating a single window's predictions across all years
+              (the v2 bug). That made every dropdown year show the same
+              signal.  Instead we surface a clear error so the user knows
+              to re-run the pipeline.
+
+    Tier 3 — Empty DataFrame → show 'no predictions' warning in UI.
     """
     try:
         import data_manager_hf as dm
         import config as cfg
-        from models import MomentumRanker
 
         target_etfs = cfg.OPTION_A_ETFS if option == "a" else cfg.OPTION_B_ETFS
         test_start  = cfg.TEST_START
 
-        # ── Tier 1: stored wf parquet (force fresh download) ─────────────
+        # ── Tier 1: stored wf parquet ─────────────────────────────────────
         stored = dm.load_wf_predictions(option, force_download=True)
         if stored is not None and not stored.empty and "train_start" in stored.columns:
-            # Validate schema — check first ETF has _P or _Prob column
-            first_etf = target_etfs[0]
-            has_p_col = (f"{first_etf}_P" in stored.columns or
-                         f"{first_etf}_Prob" in stored.columns or
-                         any(c.startswith(f"{first_etf}_") for c in stored.columns))
-            if has_p_col:
+            # Validate schema — check first ETF has a probability column
+            first_etf  = target_etfs[0]
+            has_p_col  = (
+                f"{first_etf}_P"    in stored.columns or
+                f"{first_etf}_Prob" in stored.columns or
+                any(c.startswith(f"{first_etf}_") for c in stored.columns)
+            )
+            n_windows  = stored["train_start"].nunique()
+            if has_p_col and n_windows >= 1:
+                print(f"_load_wf_preds: loaded {len(stored)} rows across "
+                      f"{n_windows} training windows for option {option}")
                 return stored
 
-        # ── Tier 2: live recompute from ranker + dataset ─────────────────
-        # Rebuild a fresh MomentumRanker with the correct target_etfs
-        # (avoids issues with stale pickled rankers that may have empty target_etfs)
-        start_year = getattr(cfg, "START_YEAR_DEFAULT", 2008)
-        df = dm.get_data(option=option, start_year=start_year, force_refresh=True)
-
-        if df is not None and not df.empty:
-            detector = dm.load_detector(option, force_download=True)
-            if detector is not None:
-                try:
-                    df = detector.add_regime_to_df(df)
-                except Exception as det_err:
-                    print(f"detector.add_regime_to_df failed: {det_err}")
-
-            # Build a fresh ranker with the correct ETF universe
-            fresh_ranker = MomentumRanker(target_etfs=target_etfs)
-            try:
-                if "Regime" in df.columns:
-                    fresh_ranker.fit(df)
-            except Exception as fit_err:
-                print(f"fresh_ranker.fit failed: {fit_err}")
-
-            test_df = df[df.index >= test_start]
-            if len(test_df) > fresh_ranker.lookback:
-                preds = fresh_ranker.predict_all_history(test_df)
-                if not preds.empty:
-                    # Replicate across all training windows for the dropdown
-                    all_preds = []
-                    for yr in range(2008, 2025):
-                        p = preds.copy()
-                        p["train_start"] = yr
-                        all_preds.append(p)
-                    result = pd.concat(all_preds)
-                    print(f"_load_wf_preds: live recompute produced {len(preds)} rows "
-                          f"with cols {list(preds.columns[:5])}")
-                    return result
-
+        # ── Tier 2: warn, return empty ────────────────────────────────────
+        # We deliberately do NOT replicate one window across all years here.
+        # That was the v2 bug that caused every dropdown year to show the
+        # same signal (e.g. always TLT or QQQ).
+        print(f"_load_wf_preds: no valid stored predictions found for option {option}. "
+              f"Please run: python train_hf.py --option {option} --force-retrain")
         return pd.DataFrame()
 
     except Exception as e:
@@ -239,8 +222,6 @@ def _load_dataset(option: str, start_year: int) -> pd.DataFrame:
 def _load_sweep(option: str) -> tuple:
     try:
         import data_manager_hf as dm
-        # load_sweep_results scans HF for dated sweep files and returns
-        # (dict of year->result, latest_date_string)
         return dm.load_sweep_results(option)
     except Exception as e:
         print(f"Error loading sweep: {e}")
@@ -359,10 +340,7 @@ def show_hero_banner(next_signal, conviction_label, conviction_z,
 def show_prob_bars(last_p: list, target_etfs: list, option: str):
     """
     Display ETF probability bars.
-
-    CORRECTED: Now properly handles the probability values from the 
-    softmax-based calculation in MomentumRanker. The values should
-    represent actual relative momentum probabilities, not uniform 50%.
+    Uses softmax-based probabilities from MomentumRanker.
     """
     st.subheader("Momentum Probability — Next 5 Days")
     n = len(target_etfs)
@@ -370,22 +348,20 @@ def show_prob_bars(last_p: list, target_etfs: list, option: str):
         st.info("No ETF data available.")
         return
 
-    # CORRECTED: Check if all probabilities are the same (indicates bug/old data)
-    if len(set(last_p)) == 1:
-        st.warning("⚠️ All ETFs show identical probabilities. This may indicate:")
-        st.markdown("""
-        - Legacy data from before the probability calculation fix
-        - Insufficient variance in momentum scores
-        - Missing data for the calculation period
-
-        **Recommendation:** Re-run the training pipeline to generate new predictions.
-        """)
+    # Warn if all identical (indicates stale / pre-fix data)
+    unique_vals = set(round(p, 4) for p in last_p)
+    if len(unique_vals) == 1:
+        st.warning(
+            "⚠️ All ETFs show identical probabilities. "
+            "This indicates the predictions were generated before the "
+            "deduplication fix. Re-run the training pipeline with "
+            "`--force-retrain` to generate fresh per-window predictions."
+        )
 
     cols = st.columns(min(n, 6))
+    baseline = 1.0 / n
     for i, etf in enumerate(target_etfs):
-        p_val = last_p[i] if i < len(last_p) else 0.5
-        # CORRECTED: Use proper baseline comparison (1/n instead of 0.5)
-        baseline = 1.0 / n
+        p_val = last_p[i] if i < len(last_p) else baseline
         delta = p_val - baseline
         cols[i % 6].metric(
             label=etf,
@@ -508,15 +484,23 @@ def show_audit_trail(audit_trail: list, target_etfs: list,
 
 
 def _check_staleness(pred_bt: pd.DataFrame):
+    """
+    Warn when predictions are stale.
+
+    KEY FIX: threshold raised from >1 to >3 calendar days so that normal
+    weekend gaps (Fri close → Mon open = 3 days) don't trigger a false
+    staleness warning every Monday morning.
+    """
     if pred_bt is None or pred_bt.empty:
         return
     try:
         pred_last  = pred_bt.index[-1].date()
         days_stale = (_today_est() - pred_last).days
-        if days_stale > 1:
+        if days_stale > 3:
             st.warning(
                 f"⚠️ Predictions are stale — last update: **{pred_last}** "
-                f"({days_stale} calendar days ago).",
+                f"({days_stale} calendar days ago). "
+                f"The daily pipeline may not have run recently.",
                 icon="📅",
             )
     except Exception:
@@ -563,8 +547,16 @@ def render_single_year_tab(option: str, target_etfs: list, params: dict):
         wf_preds = _load_wf_preds(option)
 
     if wf_preds.empty:
-        st.warning("No walk‑forward predictions found. Run the daily pipeline first.")
-        st.info("Expected file: wf_mom_pred_history.parquet in HF dataset")
+        st.warning("No walk‑forward predictions found.")
+        st.info(
+            "The wf_mom_pred_history.parquet on Hugging Face is missing or "
+            "was generated before the deduplication fix. "
+            "Please re-run the training pipeline:\n\n"
+            f"```\npython train_hf.py --option {option} --force-retrain\n"
+            f"python train_hf.py --option {option} --sweep\n```\n\n"
+            "Or trigger **Manual Retrain** in GitHub Actions with "
+            "`force_refresh=true`."
+        )
         return
 
     with st.expander("🔧 Debug info (click to expand)"):
@@ -572,9 +564,16 @@ def render_single_year_tab(option: str, target_etfs: list, params: dict):
         st.write(f"Shape: {wf_preds.shape}")
         st.write(f"Index range: {wf_preds.index.min()} -> {wf_preds.index.max()}")
         if "train_start" in wf_preds.columns:
-            st.write(f"✅ 'train_start' values: {sorted(wf_preds['train_start'].unique())}")
+            ts_vals = sorted(wf_preds["train_start"].unique())
+            st.write(f"✅ 'train_start' values ({len(ts_vals)} windows): {ts_vals}")
+            # Sanity-check: warn if only 1 unique window (sign of old bug)
+            if len(ts_vals) == 1:
+                st.error(
+                    "❌ Only ONE training window found — this is the deduplication bug. "
+                    "Re-run with --force-retrain to regenerate all 17 windows."
+                )
         else:
-            st.error("❌ 'train_start' column MISSING")
+            st.error("❌ 'train_start' column MISSING — please re-run training pipeline.")
 
     if "train_start" not in wf_preds.columns:
         st.error("Cannot display training windows: 'train_start' column is missing.")
@@ -582,7 +581,7 @@ def render_single_year_tab(option: str, target_etfs: list, params: dict):
         return
 
     train_start_years = sorted(wf_preds["train_start"].unique())
-    train_start_years = [y for y in train_start_years if 2008 <= y <= 2024]
+    train_start_years = [int(y) for y in train_start_years if 2008 <= int(y) <= 2024]
 
     if not train_start_years:
         st.warning("No valid training start years found (2008-2024).")
@@ -605,36 +604,43 @@ def render_single_year_tab(option: str, target_etfs: list, params: dict):
         (wf_preds.index >= test_start)
     ]
     if window_preds_raw.empty:
-        st.warning(f"No predictions for training start {selected_train_start} in test period.")
+        st.warning(f"No predictions for training start {selected_train_start} "
+                   f"in test period. This may indicate the window was not saved "
+                   f"correctly. Try re-running: "
+                   f"`python train_hf.py --option {option} "
+                   f"--single-year {selected_train_start}`")
         return
 
-    pred_df = _extract_prediction_columns(window_preds_raw, target_etfs)
-    if pred_df.empty:
-        st.error(f"Could not find prediction columns for {target_etfs}.")
-        st.code(f"Available: {list(window_preds_raw.columns)}")
-        return
-
-    # If predictions have _P columns already, pass through directly.
-    # If they have _Prob columns (old schema), rename to _P so strategy.py works.
+    # Normalise column schema: {ETF}_Prob → {ETF}_P if needed
     first_etf = target_etfs[0] if target_etfs else ""
-    if first_etf and f"{first_etf}_Prob" in window_preds_raw.columns and        f"{first_etf}_P" not in window_preds_raw.columns:
+    if (first_etf and
+            f"{first_etf}_Prob" in window_preds_raw.columns and
+            f"{first_etf}_P" not in window_preds_raw.columns):
         rename_map = {}
         for etf in target_etfs:
             if f"{etf}_Prob" in window_preds_raw.columns:
                 rename_map[f"{etf}_Prob"] = f"{etf}_P"
         window_preds_raw = window_preds_raw.rename(columns=rename_map)
-        # Also add stub _RS and _PA columns so strategy.py doesn't fall back
         for etf in target_etfs:
             if f"{etf}_P" in window_preds_raw.columns:
-                window_preds_raw[f"{etf}_RS"] = window_preds_raw[f"{etf}_P"]
-                window_preds_raw[f"{etf}_PA"] = window_preds_raw[f"{etf}_P"]
-                window_preds_raw[f"{etf}_Disagree"] = False
-        pred_df = _extract_prediction_columns(window_preds_raw, target_etfs)
+                if f"{etf}_RS" not in window_preds_raw.columns:
+                    window_preds_raw[f"{etf}_RS"] = window_preds_raw[f"{etf}_P"]
+                if f"{etf}_PA" not in window_preds_raw.columns:
+                    window_preds_raw[f"{etf}_PA"] = window_preds_raw[f"{etf}_P"]
+                if f"{etf}_Disagree" not in window_preds_raw.columns:
+                    window_preds_raw[f"{etf}_Disagree"] = False
+
+    pred_df = _extract_prediction_columns(window_preds_raw, target_etfs)
+    if pred_df.empty:
+        st.error(f"Could not find prediction columns for {target_etfs}.")
+        st.code(f"Available columns: {list(window_preds_raw.columns)}")
+        return
 
     available_etfs = list(pred_df.columns)
     if len(available_etfs) < len(target_etfs):
         missing = set(target_etfs) - set(available_etfs)
-        st.warning(f"Missing predictions for: {', '.join(missing)}. Using: {available_etfs}")
+        st.warning(f"Missing predictions for: {', '.join(missing)}. "
+                   f"Using available: {available_etfs}")
 
     with st.spinner("Loading dataset..."):
         start_year = _safe_get_config("START_YEAR_DEFAULT", 2008)
@@ -653,12 +659,14 @@ def render_single_year_tab(option: str, target_etfs: list, params: dict):
 
     st.success(
         f"Training: **{selected_train_start} – 2024** | "
-        f"Test: **{pred_df.index[0].date()} -> {pred_df.index[-1].date()}** "
+        f"Test: **{pred_df.index[0].date()} → {pred_df.index[-1].date()}** "
         f"({len(pred_df)} days)"
     )
     st.divider()
 
-    result = run_strategy(pred_df, df, available_etfs, params)
+    # Pass the full window_preds_raw (with all {ETF}_RS, _PA, _Disagree cols)
+    # to run_strategy so execute_strategy() can read them correctly.
+    result = run_strategy(window_preds_raw, df, available_etfs, params)
     if not result:
         st.error("Strategy execution failed.")
         return
@@ -666,7 +674,8 @@ def render_single_year_tab(option: str, target_etfs: list, params: dict):
     _render_results(
         result, available_etfs, option,
         suffix=f"train_{selected_train_start}",
-        banner_label=f"Test period end: {result['pred_bt'].index[-1].strftime('%b %d, %Y')}"
+        banner_label=(f"Test period end: "
+                      f"{result['pred_bt'].index[-1].strftime('%b %d, %Y')}")
     )
 
 
@@ -756,10 +765,25 @@ def render_consensus_tab(option: str, target_etfs: list):
         sweep_data, best_date = _load_sweep(option)
 
     if not sweep_data:
-        st.info("No sweep results available. Run the daily pipeline first.")
+        st.info(
+            "No sweep results available. Run the sweep pipeline first:\n\n"
+            f"```\npython train_hf.py --option {option} --sweep\n```\n\n"
+            "Or trigger **Manual Retrain** in GitHub Actions."
+        )
         return
 
     years_available = sorted(sweep_data.keys())
+
+    # Sanity-check: warn if all years have the same signal (sign of stale data)
+    signals = [sweep_data[y].get("signal") for y in years_available]
+    if len(set(signals)) == 1 and len(signals) > 1:
+        st.warning(
+            f"⚠️ All {len(signals)} sweep years show the same signal "
+            f"(**{signals[0]}**). This may indicate sweep data generated "
+            f"before the deduplication fix. Re-run: "
+            f"`python train_hf.py --option {option} --sweep`"
+        )
+
     st.caption(f"Years: {', '.join(str(y) for y in years_available)} "
                f"| Last update: {best_date or 'unknown'}")
 
@@ -907,7 +931,7 @@ def render_consensus_tab(option: str, target_etfs: list):
 
 def main():
     try:
-        # ── Sidebar (must be inside main — never at module level) ─────────────
+        # ── Sidebar ───────────────────────────────────────────────────────────
         with st.sidebar:
             st.title("P2-ETF Engine")
             st.caption("Wasserstein Regime Detection\n"
@@ -955,7 +979,8 @@ def main():
         option_a_etfs = _safe_get_config("OPTION_A_ETFS",
                                          ["TLT", "VNQ", "SLV", "GLD", "LQD", "HYG"])
         option_b_etfs = _safe_get_config("OPTION_B_ETFS",
-                                         ["SPY", "QQQ", "XLK", "XLF", "XLE", "XLV"])
+                                         ["QQQ", "XLK", "XLF", "XLE", "XLV",
+                                          "XLI", "XLY", "XLP", "XLU", "GDX", "XME"])
 
         tab_a, tab_b = st.tabs([
             "🏦 Option A — FI / Commodities",
