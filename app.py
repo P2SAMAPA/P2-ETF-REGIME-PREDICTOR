@@ -476,12 +476,13 @@ def render_single_year_tab(option: str, target_etfs: list, params: dict):
         st.error("Cannot display test years: 'test_year' column is missing.")
         return
 
-    # Build dropdown options from config WINDOWS (preserves label)
-    window_map = {w["test_year"]: w for w in cfg.WINDOWS}
-    available_years = sorted(
+    # Build dropdown: historical years first (sorted), live window last
+    historical_years = sorted(
         y for y in wf_preds["test_year"].unique()
-        if y in window_map
+        if y in window_map and y != 9999
     )
+    has_live = 9999 in wf_preds["test_year"].values and 9999 in window_map
+    available_years = historical_years + ([9999] if has_live else [])
     if not available_years:
         st.warning("No valid test years found in predictions.")
         return
@@ -547,6 +548,13 @@ def render_single_year_tab(option: str, target_etfs: list, params: dict):
         missing = set(target_etfs) - set(available_etfs)
         st.warning(f"Missing predictions for: {', '.join(missing)}")
 
+    # Strip metadata columns — execute_strategy only needs {ETF}_P/_RS/_PA/_Disagree
+    drop_meta = [c for c in ["test_year", "train_start", "Top_Pick", "Regime"]
+                 if c in window_preds_raw.columns]
+    strategy_preds = window_preds_raw.drop(columns=drop_meta)
+    # Deduplicate index in case old parquet had duplicate dates
+    strategy_preds = strategy_preds[~strategy_preds.index.duplicated(keep="last")]
+
     with st.spinner("Loading dataset..."):
         start_year = _safe_get_config("START_YEAR_DEFAULT", 2008)
         df = _load_dataset(option, start_year)
@@ -570,7 +578,7 @@ def render_single_year_tab(option: str, target_etfs: list, params: dict):
     )
     st.divider()
 
-    result = run_strategy(window_preds_raw, df, available_etfs, params)
+    result = run_strategy(strategy_preds, df, available_etfs, params)
     if not result:
         st.error("Strategy execution failed.")
         return
