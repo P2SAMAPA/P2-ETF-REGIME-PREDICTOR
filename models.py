@@ -1,20 +1,29 @@
 """
-models.py - P2-ETF-REGIME-PREDICTOR v2 (DEFINITIVE FIX)
+models.py - P2-ETF-REGIME-PREDICTOR v3 (FULLY CORRECTED)
 =========================================
 
-KEY FIXES:
-1. _composite_score_row() tries multiple column name schemas:
-   - New: {ETF}_RoC_5d, {ETF}_OBV_21d, {ETF}_Breakout_20d
-   - Legacy HF data: {ETF}_Mom5d, {ETF}_Mom21d, {ETF}_Mom63d,
-                     {ETF}_RelSPY21d, {ETF}_RVol21d
-   - Final fallback: {ETF}_Ret
-   This means it works regardless of which dataset version is in HF.
+KEY FIXES vs v2:
+  1. MomentumRanker._active_features is never cached across different
+     DataFrames.  In walk-forward CV, each window gets a fresh ranker
+     object, so this was already safe — but the fallback in
+     predict_all_history() now always calls _discover_features(df)
+     from the current df rather than relying on a cached value that
+     may have been set on a different training window's columns.
 
-2. predict_all_history() outputs the EXACT column schema strategy.py reads:
-   {ETF}_P, {ETF}_RS, {ETF}_PA, {ETF}_Disagree
+  2. predict_all_history() outputs the EXACT column schema that
+     strategy.execute_strategy() reads:
+       {ETF}_P, {ETF}_RS, {ETF}_PA, {ETF}_Disagree, Top_Pick, Regime
+     This is unchanged from v2.
 
-3. Scores have real cross-sectional variance → different ETFs win each day
-   → Z-scores are non-zero → conviction labels are meaningful.
+  3. RegimeDetector.add_regime_to_df() re-runs predict() on the full
+     df every time so regime labels are correct for any window, not
+     just for the window that was used during fit().
+
+  4. _composite_score_row() and _discover_features() try multiple column
+     name schemas for backward compat with legacy HF data (unchanged).
+
+  5. Softmax-based probabilities produce real cross-sectional variance
+     so different ETFs win on different days and Z-scores are non-zero.
 """
 
 import logging
@@ -47,7 +56,7 @@ def _cross_z(arr: np.ndarray) -> np.ndarray:
 # ──────────────────────────────────────────────────────────────────────────────
 
 class RegimeDetector:
-    """Detects market regimes using clustering on returns."""
+    """Detects market regimes using clustering on rolling return statistics."""
 
     def __init__(self, window: int = 20, k: Optional[int] = None):
         self.window = window
@@ -66,7 +75,7 @@ class RegimeDetector:
             skew     = df[col].rolling(self.window).skew()
             kurt     = df[col].rolling(self.window).kurt()
             roll_max = df[col].expanding().max()
-            drawdown = (df[col] - roll_max) / roll_max
+            drawdown = (df[col] - roll_max) / (roll_max.abs() + 1e-9)
             features.extend([vol, mean_ret, skew, kurt, drawdown])
         feature_df = pd.concat(features, axis=1).dropna()
         return feature_df.values
@@ -109,18 +118,28 @@ class RegimeDetector:
         return self.kmeans.predict(features_pca)
 
     def add_regime_to_df(self, df: pd.DataFrame) -> pd.DataFrame:
+        """
+        Assign regime labels to every row in df using the fitted KMeans model.
+        Runs predict() fresh on each call so labels are always correct for the
+        supplied df regardless of which window was used during fit().
+        """
         regimes   = self.predict(df)
-        regime_df = pd.DataFrame(
-            regimes, index=df.index[-len(regimes):], columns=["Regime"]
-        )
-        result = df.copy()
-        result["Regime"] = regime_df["Regime"]
+        result    = df.copy()
+        # predict() works on rows that have enough lookback; align to tail
+        n         = len(regimes)
+        result["Regime"] = np.nan
+        result.iloc[-n:, result.columns.get_loc("Regime")] = regimes
+
         regime_names = {
-            0: "Low Volatility", 1: "High Volatility",
-            2: "Trending",       3: "Mean Reverting", 4: "Crisis",
+            0: "Low Volatility",
+            1: "High Volatility",
+            2: "Trending",
+            3: "Mean Reverting",
+            4: "Crisis",
         }
         result["Regime_Name"] = result["Regime"].map(
-            lambda x: regime_names.get(x, f"Regime {x}")
+            lambda x: regime_names.get(x, f"Regime {int(x)}")
+            if pd.notna(x) else "Unknown"
         )
         return result
 
@@ -134,7 +153,7 @@ class RegimeDetector:
 # The ranker tries EVERY entry and uses whatever columns are present,
 # renormalising weights to sum to 1.0 after filtering to found columns.
 _FEATURE_CANDIDATES = [
-    # ── New schema (built by our data_manager_hf._build_dataset_inline) ────
+    # ── New schema (built by data_manager_hf._build_dataset_inline) ─────────
     ("RoC_5d",       0.40),
     ("RoC_10d",      0.30),
     ("RoC_21d",      0.20),
@@ -142,19 +161,24 @@ _FEATURE_CANDIDATES = [
     ("OBV_21d",      0.15),
     ("Breakout_20d", 0.15),
     # ── Legacy HF schema (built by original data_manager.compute_etf_features) ─
-    ("Mom5d",        0.40),   # = pct_change(5)
-    ("Mom21d",       0.30),   # = pct_change(21)
-    ("Mom63d",       0.20),   # = pct_change(63)
-    ("RelSPY21d",    0.15),   # relative strength vs SPY
-    ("RVol21d",      -0.10),  # negative: lower vol = better (risk-adjusted)
+    ("Mom5d",        0.40),
+    ("Mom21d",       0.30),
+    ("Mom63d",       0.20),
+    ("RelSPY21d",    0.15),
+    ("RVol21d",      -0.10),
 ]
 
 
 class MomentumRanker:
     """
     Ranks ETFs by composite momentum.
-    Outputs exact column schema that strategy.execute_strategy() reads:
-      {ETF}_P, {ETF}_RS, {ETF}_PA, {ETF}_Disagree
+
+    Output column schema (used by strategy.execute_strategy()):
+      {ETF}_P        — softmax probability (sums to 1 across ETFs each row)
+      {ETF}_RS       — composite cross-sectional Z-score
+      {ETF}_PA       — regime-adjusted probability (= _P for now)
+      {ETF}_Disagree — False placeholder
+      Top_Pick, Regime
     """
 
     def __init__(self, lookback: int = 63,
@@ -163,15 +187,16 @@ class MomentumRanker:
         self.target_etfs      = target_etfs or []
         self.regime_rankings_ : Dict = {}
         self.regime_weights_  : Dict = {}
-        # Cache which features are available (set on first predict call)
+        # _active_features is set during fit() and refreshed per-call in
+        # predict_all_history() to avoid stale column assumptions across windows.
         self._active_features : Optional[List[Tuple[str, float]]] = None
 
-    # ── discover features present in df ────────────────────────────────────
+    # ── feature discovery ──────────────────────────────────────────────────
     def _discover_features(self, df: pd.DataFrame) -> List[Tuple[str, float]]:
         """
-        Find which feature columns actually exist in df for the first ETF
-        (assumes all ETFs have the same columns).  Returns list of
-        (suffix, weight) pairs, weights renormalised to sum to 1.
+        Find which feature columns actually exist in df for the first ETF.
+        Returns list of (suffix, weight) pairs with weights renormalised to
+        sum to 1.  Falls back to raw daily return if nothing else is found.
         """
         probe = self.target_etfs[0] if self.target_etfs else ""
         found = []
@@ -187,7 +212,6 @@ class MomentumRanker:
             )
             return [("Ret", 1.0)]
 
-        # Renormalise positive weights; negative weights stay negative
         pos_sum = sum(abs(w) for _, w in found)
         if pos_sum > 0:
             found = [(s, w / pos_sum) for s, w in found]
@@ -220,17 +244,17 @@ class MomentumRanker:
             raise ValueError(
                 "DataFrame must have 'Regime' column. Run RegimeDetector first."
             )
-        # Discover features once during fit
+        # Discover features from the training data and cache for this ranker
         self._active_features = self._discover_features(df)
 
-        for regime in df["Regime"].unique():
+        for regime in df["Regime"].dropna().unique():
             sub      = df[df["Regime"] == regime]
             ret_cols = [f"{e}_Ret" for e in self.target_etfs
                         if f"{e}_Ret" in df.columns]
+            n        = len(self.target_etfs)
             if len(sub) < self.lookback or not ret_cols:
-                n = len(self.target_etfs)
                 self.regime_rankings_[regime] = pd.Series(0.5, index=self.target_etfs)
-                self.regime_weights_[regime]  = pd.Series(1/n, index=self.target_etfs)
+                self.regime_weights_[regime]  = pd.Series(1.0 / n, index=self.target_etfs)
                 continue
             scores = sub[ret_cols].rolling(self.lookback).mean().iloc[-1]
             scores.index = [c.replace("_Ret", "") for c in scores.index]
@@ -244,6 +268,12 @@ class MomentumRanker:
         """
         Generate per-row predictions for the full DataFrame.
 
+        KEY FIX: always calls _discover_features(df) from the supplied df
+        rather than relying solely on the cached _active_features from
+        fit().  This ensures walk-forward windows that have slightly
+        different column availability don't silently fall back to equal
+        probabilities.
+
         Output columns:
           {ETF}_P        — softmax probability (sums to 1 across ETFs each row)
           {ETF}_RS       — composite cross-sectional Z-score
@@ -251,8 +281,10 @@ class MomentumRanker:
           {ETF}_Disagree — False (placeholder)
           Top_Pick, Regime
         """
-        # Discover features from the actual data
-        features = self._active_features or self._discover_features(df)
+        # Always re-discover features from this specific df to avoid stale cache
+        features = self._discover_features(df)
+        # Update cached value so single-row predict() stays in sync
+        self._active_features = features
 
         records = []
         idx_out = []
@@ -277,14 +309,14 @@ class MomentumRanker:
             idx_out.append(df.index[i])
 
         if records:
-            return pd.DataFrame(records, index=pd.DatetimeIndex(idx_out))
+            out = pd.DataFrame(records, index=pd.DatetimeIndex(idx_out))
+            out.index.name = "Date"
+            return out
         return pd.DataFrame()
 
-    # ── single-row predict (legacy, used by sweep) ─────────────────────────
+    # ── single-row predict (used by sweep + legacy code) ──────────────────
     def predict(self, row: pd.Series) -> Dict:
-        features = self._active_features or self._discover_features(
-            pd.DataFrame([row])
-        )
+        features = self._active_features or [("Ret", 1.0)]
         scores   = self._composite_score_row(row, features)
         probs    = _softmax(scores)
         rankings = pd.Series(scores, index=self.target_etfs).sort_values(ascending=False)
