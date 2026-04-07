@@ -1,14 +1,27 @@
 """
-data_manager_hf.py - P2-ETF-REGIME-PREDICTOR v2 (FIXED)
+data_manager_hf.py - P2-ETF-REGIME-PREDICTOR v3 (FULLY CORRECTED)
 =========================================
 Data management for Hugging Face Hub storage.
 
-KEY FIX: All HF Hub calls now pass repo_type="dataset" so they hit the
-correct /api/datasets/ endpoint instead of /api/models/ (which caused 404s).
+FIXES vs v2:
+  1. save_dataframe() for wf_predictions now uses reset_index() so that
+     (Date, train_start) are BOTH stored as columns. Previously, writing
+     with index=True meant every window shared the same DatetimeIndex
+     dates (the 2025 test period) — any downstream dedup on the index
+     silently collapsed all windows into one, leaving only the last
+     train_start year visible in the Streamlit dropdown.
 
-ALSO ADDED: build_full_dataset, save_dataset, load_dataset, incremental_update,
-HF_REPO_ID, hf_write_file, hf_write_parquet — previously missing, causing
-ImportError in seed_hf_dataset.yml and daily_data_update.py.
+  2. load_dataframe() restores the DatetimeIndex from the "Date" column
+     after reading a wf_predictions parquet saved with reset_index().
+
+  3. load_sweep_result() (single-year) now also tries the dated path
+     pattern option_{opt}/sweep/sweep_{year}_{date}.json so it can
+     find the files that save_sweep_result() actually writes.
+
+  4. All HF Hub calls pass repo_type="dataset" (kept from v2).
+
+  5. hf_write_file / hf_write_parquet / build_full_dataset / save_dataset /
+     load_dataset / incremental_update all preserved from v2.
 """
 
 import os
@@ -16,6 +29,7 @@ import io
 import pickle
 import json
 import logging
+import re
 from typing import Optional, Dict, Any
 from datetime import datetime
 
@@ -24,7 +38,7 @@ import numpy as np
 
 log = logging.getLogger(__name__)
 
-# Try to import huggingface_hub
+# ── huggingface_hub ────────────────────────────────────────────────────────────
 try:
     from huggingface_hub import HfApi, hf_hub_download, upload_file, login, list_repo_files
     HF_AVAILABLE = True
@@ -40,13 +54,12 @@ try:
 except Exception:
     REPO_ID = os.environ.get("HF_DATASET_REPO", "P2SAMAPA/p2-etf-regime-predictor")
 
-HF_REPO_ID = REPO_ID          # legacy alias kept for seed workflow
-REPO_TYPE  = "dataset"        # ← THE KEY FIX
+HF_REPO_ID = REPO_ID          # legacy alias
+REPO_TYPE  = "dataset"        # ← critical: hits /api/datasets/ not /api/models/
 
-# ETF universe exports (needed by seed_hf_dataset.yml)
 try:
     import config as _cfg
-    TARGET_ETFS = _cfg.OPTION_A_ETFS   # default to Option A universe
+    TARGET_ETFS = _cfg.OPTION_A_ETFS
     ALL_TICKERS = list(dict.fromkeys(
         _cfg.OPTION_A_ETFS + _cfg.OPTION_A_BENCHMARKS +
         _cfg.OPTION_B_ETFS + _cfg.OPTION_B_BENCHMARKS
@@ -54,6 +67,7 @@ try:
 except Exception:
     TARGET_ETFS = ["TLT", "VNQ", "SLV", "GLD", "LQD", "HYG"]
     ALL_TICKERS = TARGET_ETFS + ["SPY", "AGG"]
+
 LOCAL_CACHE = "./hf_cache"
 
 # ── Authentication ─────────────────────────────────────────────────────────────
@@ -64,7 +78,6 @@ if HF_TOKEN and HF_AVAILABLE:
         print("✅ Authenticated with Hugging Face Hub")
         api = HfApi()
         try:
-            # FIX: repo_type="dataset"
             files = list_repo_files(REPO_ID, repo_type=REPO_TYPE)
             print(f"\n📁 Files found in repository {REPO_ID}:")
             for f in files:
@@ -98,7 +111,7 @@ def upload_to_hub(local_path: str, remote_path: str, repo_id: str = REPO_ID):
             path_or_fileobj=local_path,
             path_in_repo=remote_path,
             repo_id=repo_id,
-            repo_type=REPO_TYPE,      # FIX
+            repo_type=REPO_TYPE,
         )
         print(f"✅ Uploaded {remote_path} to {repo_id}")
     except Exception as e:
@@ -115,7 +128,7 @@ def hf_write_file(content: bytes, path_in_repo: str,
             path_or_fileobj=io.BytesIO(content),
             path_in_repo=path_in_repo,
             repo_id=repo_id,
-            repo_type=REPO_TYPE,      # FIX
+            repo_type=REPO_TYPE,
             commit_message=commit_message,
         )
     except Exception as e:
@@ -141,7 +154,7 @@ def download_from_hub(remote_path: str, local_path: str,
         downloaded_path = hf_hub_download(
             repo_id=repo_id,
             filename=remote_path,
-            repo_type=REPO_TYPE,      # FIX
+            repo_type=REPO_TYPE,
             local_dir=os.path.dirname(local_path) or ".",
             local_dir_use_symlinks=False,
             force_download=True,
@@ -163,22 +176,71 @@ _FILENAME_MAP = {
     "signals":        "signals.parquet",
 }
 
+
 def save_dataframe(df: pd.DataFrame, name: str, option: str, upload: bool = True):
+    """
+    Save a DataFrame to local cache and (optionally) upload to HF.
+
+    KEY FIX for wf_predictions:
+    All 17 training windows share the same test-period dates (2025-01-01
+    onward).  If we write with index=True and then read back and
+    deduplicate on the DatetimeIndex, only the last train_start window
+    survives — causing every year in the Streamlit dropdown to show the
+    same signal.
+
+    Solution: for wf_predictions we call reset_index() so the Date
+    becomes a regular column alongside train_start.  load_dataframe()
+    then restores the DatetimeIndex after reading.
+    """
     actual_name = _FILENAME_MAP.get(name, f"{name}.parquet")
     cache_path  = _get_cache_path(actual_name, option)
-    df.to_parquet(cache_path, index=True)
-    print(f"✅ Saved {name} for option {option} to {cache_path}")
+
+    if name == "wf_predictions" and "train_start" in df.columns:
+        # Ensure the index is named "Date" before resetting
+        df_save = df.copy()
+        if df_save.index.name is None or df_save.index.name == "":
+            df_save.index.name = "Date"
+        df_save = df_save.reset_index()   # Date + train_start both become columns
+        df_save.to_parquet(cache_path, index=False)
+        print(f"✅ Saved wf_predictions for option {option}: "
+              f"{len(df_save)} rows, "
+              f"train_start values: {sorted(df_save['train_start'].unique())}")
+    else:
+        df.to_parquet(cache_path, index=True)
+        print(f"✅ Saved {name} for option {option} to {cache_path}")
+
     if upload:
         upload_to_hub(cache_path, f"option_{option}/{actual_name}")
 
+
 def load_dataframe(name: str, option: str,
                    force_download: bool = False) -> Optional[pd.DataFrame]:
+    """
+    Load a DataFrame from local cache or HF.
+
+    KEY FIX for wf_predictions:
+    Parquet files saved with reset_index() have a plain integer index and
+    a "Date" column.  We detect this and restore the DatetimeIndex so the
+    rest of the app can filter by date as normal.
+    """
     actual_name = _FILENAME_MAP.get(name, f"{name}.parquet")
     cache_path  = _get_cache_path(actual_name, option)
 
+    def _fix_index(df: pd.DataFrame) -> pd.DataFrame:
+        """Restore DatetimeIndex for wf_predictions saved with reset_index()."""
+        if name == "wf_predictions":
+            if "Date" in df.columns and not isinstance(df.index, pd.DatetimeIndex):
+                df = df.set_index("Date")
+                df.index = pd.DatetimeIndex(df.index)
+                df.index.name = "Date"
+            elif isinstance(df.index, pd.DatetimeIndex):
+                pass  # already correct (old format written with index=True)
+        return df
+
     if not force_download and os.path.exists(cache_path):
         try:
-            return pd.read_parquet(cache_path)
+            df = pd.read_parquet(cache_path)
+            return _fix_index(df)
         except Exception as e:
             print(f"⚠️ Error loading local {cache_path}: {e}")
 
@@ -197,6 +259,7 @@ def load_dataframe(name: str, option: str,
                     os.replace(temp_path, cache_path)
                     try:
                         df = pd.read_parquet(cache_path)
+                        df = _fix_index(df)
                         print(f"✅ Successfully loaded {name} for option {option} from HF")
                         return df
                     except Exception as e:
@@ -214,6 +277,7 @@ def save_pickle(obj: Any, name: str, option: str, upload: bool = True):
     print(f"✅ Saved {name} for option {option} to {cache_path}")
     if upload:
         upload_to_hub(cache_path, f"option_{option}/models/{name}.pkl")
+
 
 def load_pickle(name: str, option: str, force_download: bool = False) -> Optional[Any]:
     cache_path = _get_cache_path(f"{name}.pkl", option)
@@ -248,6 +312,7 @@ def save_json(obj: Dict, name: str, option: str, upload: bool = True):
     print(f"✅ Saved {name} for option {option} to {cache_path}")
     if upload:
         upload_to_hub(cache_path, f"option_{option}/meta/{name}.json")
+
 
 def load_json(name: str, option: str, force_download: bool = False) -> Optional[Dict]:
     cache_path = _get_cache_path(f"{name}.json", option)
@@ -284,85 +349,135 @@ def get_data(option: str, start_year: int = 2000,
         f"3. Run the seed_hf_dataset workflow first if data doesn't exist"
     )
 
+
 def load_predictions(option: str, force_download: bool = False):
     return load_dataframe("predictions", option, force_download=force_download)
+
 
 def save_predictions(df: pd.DataFrame, option: str, upload: bool = True):
     save_dataframe(df, "predictions", option, upload=upload)
 
+
 def load_wf_predictions(option: str, force_download: bool = False):
     return load_dataframe("wf_predictions", option, force_download=force_download)
+
 
 def save_wf_predictions(df: pd.DataFrame, option: str, upload: bool = True):
     save_dataframe(df, "wf_predictions", option, upload=upload)
 
+
 def load_signals(option: str, force_download: bool = False):
     return load_dataframe("signals", option, force_download=force_download)
+
 
 def save_signals(df: pd.DataFrame, option: str, upload: bool = True):
     save_dataframe(df, "signals", option, upload=upload)
 
+
 def load_detector(option: str, force_download: bool = False):
     return load_pickle("regime_detector", option, force_download=force_download)
+
 
 def save_detector(detector, option: str, upload: bool = True):
     save_pickle(detector, "regime_detector", option, upload=upload)
 
+
 def save_ranker(ranker, option: str, upload: bool = True):
     save_pickle(ranker, "momentum_ranker", option, upload=upload)
 
+
 def load_ranker(option: str, force_download: bool = False):
     return load_pickle("momentum_ranker", option, force_download=force_download)
+
 
 def save_feature_list(features: list, option: str, upload: bool = True):
     save_json({"features": features, "timestamp": str(datetime.now())},
               "features", option, upload=upload)
 
+
 def load_feature_list(option: str, force_download: bool = False):
     data = load_json("features", option, force_download=force_download)
     return data.get("features") if data else None
 
+
 def save_sweep_result(result: Dict, year: int, option: str, upload: bool = True):
-    """Save a sweep result for a year. Uploads to option_X/sweep/sweep_YYYY_YYYYMMDD.json"""
+    """
+    Save a sweep result for one training-start year.
+    Writes to: option_{opt}/sweep/sweep_{year}_{YYYYMMDD}.json
+    """
     date_str   = datetime.now().strftime("%Y%m%d")
     name       = f"sweep_{year}"
     cache_path = _get_cache_path(f"{name}.json", option)
     with open(cache_path, "w") as f:
         json.dump(result, f, indent=2, default=str)
     if upload:
-        # Write to sweep/ subfolder with date stamp (matches existing HF structure)
         remote = f"option_{option}/sweep/sweep_{year}_{date_str}.json"
         upload_to_hub(cache_path, remote)
 
+
 def load_sweep_result(year: int, option: str, force_download: bool = False) -> Optional[Dict]:
-    """Load the latest sweep result for a given year."""
+    """
+    Load the latest sweep result for a given training-start year.
+
+    KEY FIX: now also tries the dated path pattern that save_sweep_result()
+    actually writes, so per-year results can be found on HF even when the
+    legacy un-dated paths don't exist.
+    """
     cache_path = _get_cache_path(f"sweep_{year}.json", option)
+
     if not force_download and os.path.exists(cache_path):
         try:
             with open(cache_path) as f:
                 return json.load(f)
         except Exception:
             pass
-    # Try to download the latest dated file from HF
-    if HF_AVAILABLE:
-        temp_path = cache_path + ".tmp"
-        # Try un-dated path first (legacy)
-        for remote in [
-            f"option_{option}/meta/sweep_{year}.json",
-            f"option_{option}/sweep/sweep_{year}.json",
-        ]:
+
+    if not HF_AVAILABLE:
+        return None
+
+    temp_path = cache_path + ".tmp"
+
+    # 1. Try legacy un-dated paths first (backward compat)
+    for remote in [
+        f"option_{option}/meta/sweep_{year}.json",
+        f"option_{option}/sweep/sweep_{year}.json",
+    ]:
+        if download_from_hub(remote, temp_path):
+            if os.path.exists(temp_path):
+                os.replace(temp_path, cache_path)
+                with open(cache_path) as f:
+                    return json.load(f)
+
+    # 2. Scan repo for the latest dated file for this year
+    try:
+        files     = list_repo_files(REPO_ID, repo_type=REPO_TYPE)
+        pattern   = re.compile(
+            rf"option_{option}/sweep/sweep_{year}_(\d{{8}})\.json"
+        )
+        candidates = {}
+        for fpath in files:
+            m = pattern.match(fpath)
+            if m:
+                candidates[m.group(1)] = fpath
+        if candidates:
+            latest_ds = max(candidates.keys())
+            remote    = candidates[latest_ds]
             if download_from_hub(remote, temp_path):
                 if os.path.exists(temp_path):
                     os.replace(temp_path, cache_path)
                     with open(cache_path) as f:
                         return json.load(f)
+    except Exception as e:
+        log.warning(f"load_sweep_result({year}): repo scan failed: {e}")
+
     return None
+
 
 def load_sweep_results(option: str) -> tuple:
     """
-    Load all sweep results for an option by scanning the HF repo for sweep files.
-    Returns (dict of year->result, date_string_of_latest_file).
-    Called by app.py.
+    Load all sweep results for an option by scanning the HF repo for dated
+    sweep files.  Returns (dict of year->result, date_string_of_latest_file).
+    Called by app.py render_consensus_tab.
     """
     results   = {}
     best_date = None
@@ -376,10 +491,9 @@ def load_sweep_results(option: str) -> tuple:
         log.warning(f"load_sweep_results: could not list repo files: {e}")
         return results, best_date
 
-    # Collect sweep files: option_a/sweep/sweep_YYYY_YYYYMMDD.json
-    import re
-    prefix  = f"option_{option}/sweep/"
+    # Collect sweep files: option_{opt}/sweep/sweep_YYYY_YYYYMMDD.json
     pattern = re.compile(rf"option_{option}/sweep/sweep_(\d{{4}})_(\d{{8}})\.json")
+
     # Group by year, keep only the latest date stamp per year
     best_per_year: Dict[int, str] = {}
     for fpath in files:
@@ -396,8 +510,8 @@ def load_sweep_results(option: str) -> tuple:
     best_date = max(best_per_year.values())
 
     for year, date_stamp in best_per_year.items():
-        remote    = f"option_{option}/sweep/sweep_{year}_{date_stamp}.json"
-        cache_key = f"sweep_{year}_{date_stamp}"
+        remote     = f"option_{option}/sweep/sweep_{year}_{date_stamp}.json"
+        cache_key  = f"sweep_{year}_{date_stamp}"
         cache_path = _get_cache_path(f"{cache_key}.json", option)
         if not os.path.exists(cache_path):
             temp = cache_path + ".tmp"
@@ -414,6 +528,7 @@ def load_sweep_results(option: str) -> tuple:
     log.info(f"load_sweep_results: loaded {len(results)} sweep years for option {option}")
     return results, best_date
 
+
 def list_available_data(option: str) -> Dict[str, bool]:
     return {
         "data":           load_dataframe("data", option) is not None,
@@ -427,8 +542,6 @@ def list_available_data(option: str) -> Dict[str, bool]:
 
 
 # ── High-level functions (seed workflow + daily_data_update.py) ────────────────
-# These were completely missing from the previous version.
-
 def build_full_dataset(option: str, start_year: int = 2008) -> pd.DataFrame:
     """
     Fetch + engineer the full feature dataset from FRED + yfinance.
@@ -559,7 +672,6 @@ def incremental_update(df_existing: pd.DataFrame,
 
     all_tickers  = list(dict.fromkeys(etfs + benchmarks))
     fred_key     = os.environ.get("FRED_API_KEY", "")
-    # Use 100-day lookback so rolling windows (max=63d) are accurate
     lookback_str = (last_date - pd.Timedelta(days=100)).strftime("%Y-%m-%d")
 
     log.info(f"incremental_update: fetching new data {start_str} → {end_str}…")
@@ -572,7 +684,6 @@ def incremental_update(df_existing: pd.DataFrame,
         log.info("incremental_update: no new trading days found.")
         return df_existing
 
-    # Build a combined close series for accurate rolling-window features
     existing_close_cols = {
         t: f"{t}_Close" for t in all_tickers if f"{t}_Close" in df_existing.columns
     }
@@ -609,7 +720,6 @@ def incremental_update(df_existing: pd.DataFrame,
         rng = (hi - lo).replace(0, np.nan)
         delta[f"{t}_Breakout_20d"] = (ser_c.reindex(new_idx) - lo) / rng
 
-    # FRED (incremental)
     if fred_key:
         for sid in fred_map:
             try:
@@ -620,7 +730,6 @@ def incremental_update(df_existing: pd.DataFrame,
                 if sid in df_existing.columns:
                     delta[sid] = df_existing[sid].iloc[-1]
 
-    # Align columns before concat
     for col in df_existing.columns:
         if col not in delta.columns:
             delta[col] = np.nan
