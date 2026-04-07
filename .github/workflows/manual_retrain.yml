@@ -1,46 +1,37 @@
 name: Manual Retrain — P2-ETF-REGIME-PREDICTOR
 
-# Trigger manually from GitHub Actions UI, or on the Monday 03:00 UTC schedule.
+# IMPORTANT — one-time action after deploying v4:
+# Trigger this workflow with force_retrain=true (the default).
+# This wipes the old HF parquet (keyed by train_start) and rebuilds
+# using the new expanding-window schema (keyed by test_year).
+# After this run the dropdown will show test years 2012–2025 with
+# genuinely different OOS signals for each year.
 #
-# IMPORTANT: after deploying the v3 deduplication fix, you MUST trigger this
-# workflow once with force_retrain=true (the default).  This deletes the stale
-# HF parquet that only contains a single training window and regenerates all
-# 17 windows correctly.  Without this one-time retrain, the Streamlit dropdown
-# will continue showing the same signal for every year.
-#
-# Estimated runtimes on GitHub free tier:
-#   retrain-full-a/b     ~30-35 min each
-#   retrain-wf-sweep-a/b ~80-100 min each
-# Total cold start: ~2-3 hours
+# Estimated runtimes (GitHub free tier):
+#   full-train-a/b     ~30-35 min each
+#   wf-sweep-a/b       ~80-100 min each
+# Total: ~2-3 hours
 
 on:
   schedule:
-    # Monday 03:00 UTC — weekly full rebuild to keep all windows fresh
-    - cron: '0 3 * * 1'
+    - cron: '0 3 * * 1'   # Monday 03:00 UTC weekly rebuild
   workflow_dispatch:
     inputs:
       force_retrain:
-        description: >
-          Wipe existing wf predictions and retrain all 17 windows from scratch.
-          Set true after any schema change (models.py, data_manager_hf.py) or
-          after the first deploy of the v3 dedup fix.
+        description: 'Wipe existing WF predictions and retrain all folds (true/false)'
         required: false
         default: 'true'
       force_refresh:
-        description: >
-          Force full dataset rebuild from yfinance + FRED APIs.
-          Only needed if the stored etf_data.parquet is corrupted.
+        description: 'Rebuild dataset from yfinance + FRED APIs (true/false)'
         required: false
         default: 'false'
 
 jobs:
 
-  # ── Job 1: Full retrain Option A ───────────────────────────────────────────
   retrain-full-a:
     name: Full Retrain — Option A (FI/Commodities)
     runs-on: ubuntu-latest
     timeout-minutes: 180
-
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -53,31 +44,21 @@ jobs:
           restore-keys: ${{ runner.os }}-pip-
       - name: Install dependencies
         run: pip install -r requirements.txt
-
       - name: Full retrain Option A
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
           FRED_API_KEY: ${{ secrets.FRED_API_KEY }}
         run: |
-          RETRAIN="${{ github.event.inputs.force_retrain }}"
-          REFRESH="${{ github.event.inputs.force_refresh }}"
           CMD="python train_hf.py --option a"
-          # force_retrain defaults to true — always retrain unless explicitly false
-          if [ "$RETRAIN" != "false" ]; then
-            CMD="$CMD --force-retrain"
-          fi
-          if [ "$REFRESH" = "true" ]; then
-            CMD="$CMD --force-refresh"
-          fi
+          [ "${{ github.event.inputs.force_retrain }}" != "false" ] && CMD="$CMD --force-retrain"
+          [ "${{ github.event.inputs.force_refresh }}" = "true"  ] && CMD="$CMD --force-refresh"
           echo "Running: $CMD"
           $CMD
 
-  # ── Job 2: Full retrain Option B ───────────────────────────────────────────
   retrain-full-b:
     name: Full Retrain — Option B (Equity ETFs)
     runs-on: ubuntu-latest
     timeout-minutes: 180
-
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -90,31 +71,22 @@ jobs:
           restore-keys: ${{ runner.os }}-pip-
       - name: Install dependencies
         run: pip install -r requirements.txt
-
       - name: Full retrain Option B
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
           FRED_API_KEY: ${{ secrets.FRED_API_KEY }}
         run: |
-          RETRAIN="${{ github.event.inputs.force_retrain }}"
-          REFRESH="${{ github.event.inputs.force_refresh }}"
           CMD="python train_hf.py --option b"
-          if [ "$RETRAIN" != "false" ]; then
-            CMD="$CMD --force-retrain"
-          fi
-          if [ "$REFRESH" = "true" ]; then
-            CMD="$CMD --force-refresh"
-          fi
+          [ "${{ github.event.inputs.force_retrain }}" != "false" ] && CMD="$CMD --force-retrain"
+          [ "${{ github.event.inputs.force_refresh }}" = "true"  ] && CMD="$CMD --force-refresh"
           echo "Running: $CMD"
           $CMD
 
-  # ── Job 3: WF CV + sweep Option A ──────────────────────────────────────────
-  retrain-wf-sweep-a:
-    name: WF + Sweep — Option A (FI/Commodities)
+  sweep-a:
+    name: Sweep — Option A
     runs-on: ubuntu-latest
     timeout-minutes: 300
-    needs: retrain-full-a   # detector/ranker must exist before WF reads fixed_k
-
+    needs: retrain-full-a
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -127,35 +99,17 @@ jobs:
           restore-keys: ${{ runner.os }}-pip-
       - name: Install dependencies
         run: pip install -r requirements.txt
-
-      - name: WF CV Option A
-        env:
-          HF_TOKEN: ${{ secrets.HF_TOKEN }}
-          FRED_API_KEY: ${{ secrets.FRED_API_KEY }}
-        run: |
-          RETRAIN="${{ github.event.inputs.force_retrain }}"
-          CMD="python train_hf.py --option a --wfcv"
-          # When force_retrain=true, also pass it to wfcv so all windows
-          # are rebuilt instead of skipping already-computed ones
-          if [ "$RETRAIN" != "false" ]; then
-            CMD="$CMD --force-retrain"
-          fi
-          echo "Running: $CMD"
-          $CMD
-
       - name: Consensus sweep Option A
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
           FRED_API_KEY: ${{ secrets.FRED_API_KEY }}
         run: python train_hf.py --option a --sweep
 
-  # ── Job 4: WF CV + sweep Option B ──────────────────────────────────────────
-  retrain-wf-sweep-b:
-    name: WF + Sweep — Option B (Equity ETFs)
+  sweep-b:
+    name: Sweep — Option B
     runs-on: ubuntu-latest
     timeout-minutes: 300
-    needs: retrain-full-b   # detector/ranker must exist before WF reads fixed_k
-
+    needs: retrain-full-b
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -168,20 +122,6 @@ jobs:
           restore-keys: ${{ runner.os }}-pip-
       - name: Install dependencies
         run: pip install -r requirements.txt
-
-      - name: WF CV Option B
-        env:
-          HF_TOKEN: ${{ secrets.HF_TOKEN }}
-          FRED_API_KEY: ${{ secrets.FRED_API_KEY }}
-        run: |
-          RETRAIN="${{ github.event.inputs.force_retrain }}"
-          CMD="python train_hf.py --option b --wfcv"
-          if [ "$RETRAIN" != "false" ]; then
-            CMD="$CMD --force-retrain"
-          fi
-          echo "Running: $CMD"
-          $CMD
-
       - name: Consensus sweep Option B
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
