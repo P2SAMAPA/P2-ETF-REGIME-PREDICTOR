@@ -1,12 +1,12 @@
 name: Seed HF Dataset P2-ETF-REGIME-PREDICTOR (Full Rebuild 2008-Today)
 
 on:
-  workflow_dispatch:  # Manual trigger only — run once to seed
+  workflow_dispatch: # Manual trigger only — run once to seed
 
 jobs:
   seed-full-dataset:
     runs-on: ubuntu-latest
-    timeout-minutes: 120  # 2 hours for full history + models
+    timeout-minutes: 120 # 2 hours for full history + models
 
     steps:
       - name: Checkout Code
@@ -21,7 +21,7 @@ jobs:
         run: |
           pip install yfinance pandas-datareader huggingface-hub pandas numpy pyarrow requests scikit-learn lightgbm scipy xgboost
 
-      - name: Seed Full Dataset to HF (2008-Today)
+      - name: Seed Full Dataset to HF (2008-Today) - Option A & B
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
           FRED_API_KEY: ${{ secrets.FRED_API_KEY }}
@@ -39,7 +39,7 @@ jobs:
 
           sys.path.insert(0, '.')
           from data_manager_hf import (
-              build_full_dataset, save_dataset,   # <-- use save_dataset, not legacy alias
+              build_full_dataset, save_dataset,
               HF_REPO_ID, TARGET_ETFS, ALL_TICKERS
           )
 
@@ -48,39 +48,49 @@ jobs:
           log.info("Full history rebuild: 2008-01-01 to today")
           log.info("=" * 70)
 
-          # Options to seed
+          # Options to seed - BOTH A and B
           options = ['a', 'b']
+          all_success = True
 
           for opt in options:
+              log.info(f"")
+              log.info(f"{'='*60}")
               log.info(f"--- Seeding Option {opt.upper()} ---")
+              log.info(f"{'='*60}")
+              
               log.info("Step 1/4: Building full dataset from FRED + yfinance...")
-              df = build_full_dataset(option=opt, start_year=2008)
-
-              log.info(f"✅ Dataset built: {len(df)} rows × {df.shape[1]} columns")
-              log.info(f"   Date range: {df.index[0].date()} to {df.index[-1].date()}")
+              try:
+                  df = build_full_dataset(option=opt, start_year=2008)
+                  log.info(f"✅ Dataset built: {len(df)} rows × {df.shape[1]} columns")
+                  log.info(f"   Date range: {df.index[0].date()} to {df.index[-1].date()}")
+              except Exception as e:
+                  log.error(f"❌ Failed to build dataset for Option {opt.upper()}: {e}")
+                  all_success = False
+                  continue
 
               log.info("Step 2/4: Uploading dataset to Hugging Face...")
-              ok = save_dataset(df, option=opt)   # <-- corrected call
-              if not ok:
-                  log.error(f"❌ Failed to save dataset for Option {opt.upper()}")
-                  sys.exit(1)
-
-              log.info(f"✅ Dataset uploaded to: {HF_REPO_ID} (Option {opt.upper()})")
+              try:
+                  ok = save_dataset(df, option=opt)
+                  if not ok:
+                      log.error(f"❌ Failed to save dataset for Option {opt.upper()}")
+                      all_success = False
+                      continue
+                  log.info(f"✅ Dataset uploaded to: {HF_REPO_ID}/option_{opt}/etf_data.parquet")
+              except Exception as e:
+                  log.error(f"❌ Failed to upload dataset for Option {opt.upper()}: {e}")
+                  all_success = False
+                  continue
 
           # After both datasets are uploaded, create placeholder structure
+          log.info(f"")
+          log.info(f"{'='*60}")
           log.info("Step 3/4: Creating placeholder structure...")
+          log.info(f"{'='*60}")
 
           from data_manager_hf import hf_write_file, hf_write_parquet
           from io import BytesIO
-
-          # Empty signals file
-          empty_signals = pd.DataFrame(columns=['Date', 'Signal', 'Conviction'])
-          empty_signals.index = pd.DatetimeIndex([], name='Date')
-          buffer = BytesIO()
-          empty_signals.to_parquet(buffer, index=True)
-          buffer.seek(0)
-
           from huggingface_hub import HfApi
+          
           api = HfApi(token=os.getenv("HF_TOKEN"))
 
           # Create directory structure with README files
@@ -89,40 +99,53 @@ jobs:
               "",
               "## Structure",
               "",
-              "- data/ — Feature datasets and predictions (Parquet)",
-              "- models/ — Serialized ML models (Pickle)",
-              "- signals/ — Daily trading signals (Parquet)",
-              "- meta/ — Feature metadata (JSON)",
-              "- sweep/ — Multi-year consensus results (JSON)",
+              "- option_a/data/ — Option A (FI/Commodities) Feature datasets (Parquet)",
+              "- option_b/data/ — Option B (Equity) Feature datasets (Parquet)",
+              "- option_a/models/ — Option A Serialized ML models (Pickle)",
+              "- option_b/models/ — Option B Serialized ML models (Pickle)",
+              "- option_a/signals/ — Option A Daily trading signals (Parquet)",
+              "- option_b/signals/ — Option B Daily trading signals (Parquet)",
+              "- option_a/meta/ — Option A Feature metadata (JSON)",
+              "- option_b/meta/ — Option B Feature metadata (JSON)",
+              "- option_a/sweep/ — Option A Multi-year consensus results (JSON)",
+              "- option_b/sweep/ — Option B Multi-year consensus results (JSON)",
               "",
               "## Usage",
               "",
               "This dataset is consumed by the P2-ETF-REGIME-PREDICTOR Streamlit app.",
-              "Data updates daily via GitHub Actions at 6:30am EST.",
+              "Data updates daily via GitHub Actions at 21:30 UTC.",
           ]
           readme_content = "\n".join(readme_lines)
 
-          api.upload_file(
-              path_or_fileobj=readme_content.encode('utf-8'),
-              path_in_repo="README.md",
-              repo_id=HF_REPO_ID,
-              repo_type="dataset",
-              commit_message="Initial structure: README"
-          )
+          try:
+              api.upload_file(
+                  path_or_fileobj=readme_content.encode('utf-8'),
+                  path_in_repo="README.md",
+                  repo_id=HF_REPO_ID,
+                  repo_type="dataset",
+                  commit_message="Initial structure: README"
+              )
+              log.info("✅ README uploaded")
 
-          # Empty placeholder files
-          api.upload_file(
-              path_or_fileobj=b'{}',
-              path_in_repo="meta/feature_list.json",
-              repo_id=HF_REPO_ID,
-              repo_type="dataset",
-              commit_message="Initial structure: feature list placeholder"
-          )
+              # Empty placeholder files for both options
+              for opt in options:
+                  api.upload_file(
+                      path_or_fileobj=b'{}',
+                      path_in_repo=f"option_{opt}/meta/feature_list.json",
+                      repo_id=HF_REPO_ID,
+                      repo_type="dataset",
+                      commit_message=f"Initial structure: feature list placeholder Option {opt.upper()}"
+                  )
+                  log.info(f"✅ Placeholder created for Option {opt.upper()}")
+          except Exception as e:
+              log.warning(f"⚠️ Could not create placeholder structure: {e}")
 
-          log.info("✅ Placeholder structure created")
-
+          log.info("")
           log.info("=" * 70)
-          log.info("SEED COMPLETE")
+          if all_success:
+              log.info("SEED COMPLETE - BOTH OPTIONS")
+          else:
+              log.error("SEED COMPLETED WITH ERRORS")
           log.info("=" * 70)
           log.info(f"Dataset URL: https://huggingface.co/datasets/{HF_REPO_ID}")
           log.info("")
@@ -131,4 +154,7 @@ jobs:
           log.info("   Actions → Manual Retrain → run_wfcv=true")
           log.info("2. Verify Streamlit app can load from HF")
           log.info("3. Set up daily pipeline for incremental updates")
+          
+          if not all_success:
+              sys.exit(1)
           PYEOF
