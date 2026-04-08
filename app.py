@@ -476,6 +476,9 @@ def render_single_year_tab(option: str, target_etfs: list, params: dict):
         st.error("Cannot display test years: 'test_year' column is missing.")
         return
 
+    # Build lookup from config WINDOWS
+    window_map = {w["test_year"]: w for w in cfg.WINDOWS}
+
     # Build dropdown: historical years first (sorted), live window last
     historical_years = sorted(
         y for y in wf_preds["test_year"].unique()
