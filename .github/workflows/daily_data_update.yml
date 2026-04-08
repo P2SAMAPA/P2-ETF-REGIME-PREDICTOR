@@ -4,12 +4,12 @@ on:
   schedule:
     # Runs Mon–Fri at 21:30 UTC (after 4:00 PM ET US market close + buffer)
     - cron: '30 21 * * 1-5'
-  workflow_dispatch:  # allow manual trigger anytime
+  workflow_dispatch: # allow manual trigger anytime
 
 jobs:
   daily-data-update:
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 30
 
     steps:
       - name: Checkout repo
@@ -32,8 +32,88 @@ jobs:
           pip install --upgrade pip
           pip install -r requirements.txt
 
-      - name: Run incremental data update
+      - name: Run incremental data update - BOTH Options A & B
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
           FRED_API_KEY: ${{ secrets.FRED_API_KEY }}
-        run: python daily_data_update.py
+        run: |
+          python << 'PYEOF'
+          import os
+          import sys
+          import logging
+
+          logging.basicConfig(level=logging.INFO,
+              format="%(asctime)s [%(levelname)s] %(message)s")
+          log = logging.getLogger(__name__)
+
+          if not os.getenv("HF_TOKEN"):
+              log.error("HF_TOKEN not set — cannot read/write HF Dataset")
+              sys.exit(1)
+          if not os.getenv("FRED_API_KEY"):
+              log.warning("FRED_API_KEY not set — macro features may be stale")
+
+          sys.path.insert(0, '.')
+          from data_manager_hf import load_dataset, save_dataset, incremental_update
+
+          def update_option(option: str) -> bool:
+              """Run incremental update for a single option ('a' or 'b'). Returns True on success."""
+              label = f"Option {option.upper()}"
+              log.info(f"")
+              log.info(f"{'='*60}")
+              log.info(f"{label} — starting incremental data update")
+              log.info(f"{'='*60}")
+
+              try:
+                  df_existing = load_dataset(option)
+                  if df_existing is None or df_existing.empty:
+                      log.error(
+                          f"{label}: no existing dataset found on HF. "
+                          "Run full seed first via seed_hf_dataset workflow."
+                      )
+                      return False
+
+                  log.info(f"{label}: existing dataset — {len(df_existing)} rows, "
+                          f"last date: {df_existing.index[-1].date()}")
+
+                  df_updated = incremental_update(df_existing, option)
+                  new_rows = len(df_updated) - len(df_existing)
+
+                  if new_rows == 0:
+                      log.info(f"{label}: already up to date — nothing to push.")
+                      return True
+
+                  log.info(f"{label}: pushing +{new_rows} rows to HF...")
+                  ok = save_dataset(df_updated, option)
+                  if ok:
+                      log.info(
+                          f"{label}: ✅ done — dataset now covers "
+                          f"{df_updated.index[0].date()} → {df_updated.index[-1].date()} "
+                          f"({len(df_updated)} rows)"
+                      )
+                  else:
+                      log.error(f"{label}: ❌ failed to push updated dataset to HF")
+                  return ok
+              except Exception as e:
+                  log.error(f"{label}: ❌ Exception during update: {e}")
+                  import traceback
+                  log.error(traceback.format_exc())
+                  return False
+
+          # Update BOTH options
+          options = ['a', 'b']
+          failures = []
+
+          for opt in options:
+              ok = update_option(opt)
+              if not ok:
+                  failures.append(opt.upper())
+
+          log.info(f"")
+          log.info(f"{'='*60}")
+          if failures:
+              log.error(f"❌ Update failed for: Option(s) {', '.join(failures)}")
+              sys.exit(1)
+          else:
+              log.info("✅ Daily data update complete for ALL options (A & B).")
+          log.info(f"{'='*60}")
+          PYEOF
