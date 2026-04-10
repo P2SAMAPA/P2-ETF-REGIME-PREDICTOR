@@ -59,6 +59,8 @@ OPTION_B_ETFS = [
     "XLP",  # Consumer Staples
     "XLU",  # Utilities
     "GDX",  # Gold Miners
+    "XLB",  # Basic Materials
+    "XLRE", # Real Estate
     "XME",  # Metals & Mining
 ]
 OPTION_B_BENCHMARKS  = ["SPY", "QQQ"]
