@@ -61,6 +61,11 @@ OPTION_B_ETFS = [
     "GDX",  # Gold Miners
     "XLB",  # Basic Materials
     "XLRE", # Real Estate
+    "IWF",
+    "IWM",
+    "XSD",
+    "XBI",
+    "XAR",
     "XME",  # Metals & Mining
 ]
 OPTION_B_BENCHMARKS  = ["SPY", "QQQ"]
